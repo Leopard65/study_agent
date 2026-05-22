@@ -1,0 +1,27 @@
+# Environment
+.env
+.env.local
+backend/.env
+
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Local database and uploads
+backend/data/*.db
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Claude local config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
