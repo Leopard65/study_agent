@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import ChatHistory, Material
 from app.schemas import ChatRequest, ChatResponse, ChatHistoryItem
 from app.services import llm
+from app.services.llm import LLMConfigError, LLMCallError
 from app.services.search import search_chunks
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -26,8 +27,12 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
     context = "\n---\n".join(context_parts) if context_parts else None
 
-    # Build prompt with source awareness
-    answer = await llm.chat(req.question, context)
+    try:
+        answer = await llm.chat(req.question, context)
+    except LLMConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except LLMCallError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
     if sources:
         source_text = "、".join(sources)

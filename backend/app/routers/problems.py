@@ -1,17 +1,22 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import ProblemRecord
 from app.schemas import ProblemRequest, ProblemResponse, ProblemItem
-from app.services.llm import solve_problem
+from app.services.llm import solve_problem, LLMConfigError, LLMCallError
 
 router = APIRouter(prefix="/api/problems", tags=["problems"])
 
 
 @router.post("/solve", response_model=ProblemResponse)
 async def solve(req: ProblemRequest, db: AsyncSession = Depends(get_db)):
-    solution = await solve_problem(req.question, req.subject)
+    try:
+        solution = await solve_problem(req.question, req.subject)
+    except LLMConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except LLMCallError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     record = ProblemRecord(question=req.question, solution=solution, subject=req.subject)
     db.add(record)
     await db.commit()

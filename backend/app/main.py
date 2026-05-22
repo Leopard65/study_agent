@@ -1,7 +1,10 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from app.database import init_db
+from sqlalchemy import text
+from app.database import init_db, async_session
+from app.config import get_settings
 from app.routers import chat, materials, problems, errors, plan, dashboard
 
 
@@ -31,4 +34,47 @@ app.include_router(dashboard.router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    settings = get_settings()
+    db_status = "ok"
+    upload_status = "ok"
+    detail_parts: list[str] = []
+
+    # database check
+    try:
+        async with async_session() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = "error"
+        detail_parts.append(f"database: {e}")
+
+    # upload_dir check
+    try:
+        os.makedirs(settings.upload_dir, exist_ok=True)
+    except Exception as e:
+        upload_status = "error"
+        detail_parts.append(f"upload_dir: {e}")
+
+    # OCR availability check
+    ocr_available = False
+    try:
+        from app.services.ocr import get_available_languages
+
+        available_languages = set(get_available_languages(settings))
+        required_languages = set(settings.ocr_lang.split("+"))
+        ocr_available = required_languages.issubset(available_languages)
+    except Exception:
+        pass
+
+    overall = "ok" if db_status == "ok" and upload_status == "ok" else "degraded"
+
+    result = {
+        "status": overall,
+        "database": db_status,
+        "upload_dir": upload_status,
+        "ai_configured": bool(settings.openai_api_key.strip()),
+        "model": settings.openai_model,
+        "ocr_available": ocr_available,
+    }
+    if detail_parts:
+        result["detail"] = "; ".join(detail_parts)
+    return result

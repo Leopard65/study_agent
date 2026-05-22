@@ -1,4 +1,7 @@
+import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
+import { getHealth } from '../api/client';
+import type { HealthStatus } from '../api/client';
 
 const links = [
   { to: '/', label: '学习工作台', icon: '📊' },
@@ -11,6 +14,29 @@ const links = [
 ];
 
 export default function Sidebar() {
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    getHealth().then(setHealth).catch(() => {}).finally(() => setChecking(false));
+  }, []);
+
+  let statusText = '服务正常';
+  let statusColor = 'text-green-400';
+  if (checking) {
+    statusText = '检查中...';
+    statusColor = 'text-gray-500';
+  } else if (!health) {
+    statusText = '服务异常';
+    statusColor = 'text-red-400';
+  } else if (health.status !== 'ok') {
+    statusText = '服务异常';
+    statusColor = 'text-red-400';
+  } else if (!health.ai_configured) {
+    statusText = '未配置 AI';
+    statusColor = 'text-yellow-400';
+  }
+
   return (
     <aside className="w-56 bg-gray-900 text-gray-100 flex flex-col min-h-screen">
       <div className="px-4 py-5 text-lg font-bold border-b border-gray-700">
@@ -33,8 +59,9 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
-      <div className="px-4 py-3 text-xs text-gray-500 border-t border-gray-700">
-        MVP v0.1
+      <div className="px-4 py-3 text-xs border-t border-gray-700">
+        <div className="text-gray-500">MVP v0.1</div>
+        <div className={`mt-1 ${statusColor}`}>{statusText}</div>
       </div>
     </aside>
   );

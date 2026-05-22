@@ -10,3 +10,6 @@ chardet
 pydantic
 pydantic-settings
 python-dotenv
+PyMuPDF
+pytesseract
+Pillow

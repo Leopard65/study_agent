@@ -13,6 +13,24 @@ router = APIRouter(prefix="/api/materials", tags=["materials"])
 settings = get_settings()
 
 
+def _delete_uploaded_file(stored_filename: str) -> None:
+    """Delete a stored file from upload_dir. Skips if path escapes upload_dir or file missing."""
+    if not stored_filename:
+        return
+    upload_abs = os.path.abspath(settings.upload_dir)
+    file_abs = os.path.abspath(os.path.join(upload_abs, stored_filename))
+    try:
+        if os.path.commonpath([upload_abs, file_abs]) != upload_abs:
+            return
+    except ValueError:
+        return
+    try:
+        if os.path.isfile(file_abs):
+            os.remove(file_abs)
+    except OSError:
+        pass
+
+
 @router.post("/upload", response_model=MaterialItem)
 async def upload(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     allowed = {".pdf", ".docx", ".doc", ".txt", ".md", ".markdown"}
@@ -27,17 +45,22 @@ async def upload(file: UploadFile = File(...), db: AsyncSession = Depends(get_db
         content = await file.read()
         f.write(content)
 
-    text_content = extract_text(save_path)
-    material = Material(filename=file.filename or save_name, file_type=ext, content=text_content)
-    db.add(material)
-    await db.flush()
+    try:
+        text_content = extract_text(save_path)
+        material = Material(filename=file.filename or save_name, file_type=ext, content=text_content, stored_filename=save_name)
+        db.add(material)
+        await db.flush()
 
-    if text_content.strip():
-        await index_chunks(db, material.id, text_content)
+        if text_content.strip():
+            await index_chunks(db, material.id, text_content)
 
-    await db.commit()
-    await db.refresh(material)
-    return material
+        await db.commit()
+        await db.refresh(material)
+        return material
+    except Exception:
+        await db.rollback()
+        _delete_uploaded_file(save_name)
+        raise
 
 
 @router.get("", response_model=list[MaterialItem])
@@ -67,8 +90,8 @@ async def delete_material(material_id: int, db: AsyncSession = Depends(get_db)):
     mat = await db.get(Material, material_id)
     if not mat:
         raise HTTPException(404, "资料不存在")
-    # Delete chunks and FTS entries first
     await delete_chunks_for_material(db, material_id)
+    _delete_uploaded_file(mat.stored_filename or "")
     await db.delete(mat)
     await db.commit()
     return {"ok": True}

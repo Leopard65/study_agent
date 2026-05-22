@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { chat } from '../api/client';
+import { chat, getApiErrorMessage } from '../api/client';
 import ChatMessage from '../components/ChatMessage';
 
 interface Message {
@@ -26,8 +26,9 @@ export default function QA() {
     try {
       const res = await chat(q);
       setMessages(prev => [...prev, { role: 'assistant', content: res.answer }]);
-    } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: '请求失败，请检查后端服务。' }]);
+    } catch (err) {
+      const msg = getApiErrorMessage(err, '请求失败，请检查后端服务是否运行。');
+      setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
     } finally {
       setLoading(false);
     }

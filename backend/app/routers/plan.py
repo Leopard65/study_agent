@@ -9,7 +9,7 @@ from app.schemas import (
     StudyPlanCreate, StudyPlanUpdate, StudyPlanItem,
     PlanGenerateRequest, PlanGenerateResponse,
 )
-from app.services.llm import generate_plan
+from app.services.llm import generate_plan, LLMConfigError, LLMCallError
 
 router = APIRouter(prefix="/api/plan", tags=["plan"])
 
@@ -57,7 +57,12 @@ async def delete_plan(plan_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/generate", response_model=PlanGenerateResponse)
 async def generate(req: PlanGenerateRequest, db: AsyncSession = Depends(get_db)):
-    raw = await generate_plan(req.subjects, req.daily_hours, req.days, req.start_date)
+    try:
+        raw = await generate_plan(req.subjects, req.daily_hours, req.days, req.start_date)
+    except LLMConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except LLMCallError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
     # Try to extract JSON from response (handle markdown code blocks)
     json_str = raw.strip()

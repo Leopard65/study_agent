@@ -29,6 +29,7 @@ class MaterialItem(BaseModel):
     id: int
     filename: str
     file_type: str
+    stored_filename: Optional[str] = ""
     created_at: Optional[datetime] = None
 
     class Config:

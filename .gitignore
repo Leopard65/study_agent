@@ -18,6 +18,9 @@ frontend/dist/
 backend/data/*.db
 backend/uploads/*
 !backend/uploads/.gitkeep
+backend/tessdata/*.traineddata
+backend/*.log
+backend/*-dev*.log
 
 # Claude local config
 .claude/

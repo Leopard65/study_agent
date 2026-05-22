@@ -1,31 +1,47 @@
-import { useEffect, useState } from 'react';
-import { getDashboard, listPlans } from '../api/client';
-
-interface Stats {
-  today_tasks: number;
-  today_completed: number;
-  total_materials: number;
-  total_errors: number;
-  unmastered_errors: number;
-  streak_days: number;
-}
+import { useEffect, useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
+import { getDashboard, listPlans, updatePlan, listErrors, getApiErrorMessage } from '../api/client';
+import type { DashboardStats, StudyPlanItem } from '../api/client';
+import { formatLocalDate } from '../utils/date';
 
 export default function Dashboard() {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [todayPlans, setTodayPlans] = useState<any[]>([]);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [todayPlans, setTodayPlans] = useState<StudyPlanItem[]>([]);
+  const [updatingId, setUpdatingId] = useState<number | null>(null);
+  const [toggleError, setToggleError] = useState('');
+  const [reviewCount, setReviewCount] = useState(0);
 
-  useEffect(() => {
+  const today = formatLocalDate();
+
+  const refresh = useCallback(() => {
     getDashboard().then(setStats).catch(() => {});
-    const today = new Date().toISOString().slice(0, 10);
     listPlans(today).then(setTodayPlans).catch(() => {});
-  }, []);
+    listErrors(false)
+      .then(all => setReviewCount(all.filter(e => e.next_review_date && e.next_review_date <= today).length))
+      .catch(() => setReviewCount(0));
+  }, [today]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleToggle = async (id: number, completed: boolean) => {
+    setUpdatingId(id);
+    setToggleError('');
+    try {
+      await updatePlan(id, !completed);
+      refresh();
+    } catch (err) {
+      setToggleError(getApiErrorMessage(err, '更新失败，请检查后端服务。'));
+    } finally {
+      setUpdatingId(null);
+    }
+  };
 
   if (!stats) return <div className="p-6 text-gray-400">加载中...</div>;
 
   const cards = [
     { label: '今日任务', value: `${stats.today_completed}/${stats.today_tasks}`, color: 'bg-blue-500' },
     { label: '连续打卡', value: `${stats.streak_days} 天`, color: 'bg-green-500' },
-    { label: '资料数量', value: stats.total_materials, color: 'bg-purple-500' },
+    { label: '今日复习', value: `${reviewCount} 题`, color: 'bg-orange-500' },
     { label: '未掌握错题', value: stats.unmastered_errors, color: 'bg-red-500' },
   ];
 
@@ -45,12 +61,21 @@ export default function Dashboard() {
       </div>
       <div className="bg-white rounded-xl shadow p-5">
         <h2 className="text-lg font-semibold mb-4">今日计划</h2>
+        {toggleError && (
+          <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            {toggleError}
+          </div>
+        )}
         {todayPlans.length === 0 ? (
           <p className="text-gray-400 text-sm">暂无今日计划，去「学习计划」页面生成吧</p>
         ) : (
           <ul className="space-y-2">
-            {todayPlans.map((p: any) => (
-              <li key={p.id} className="flex items-center gap-3 text-sm">
+            {todayPlans.map((p) => (
+              <li
+                key={p.id}
+                className={`flex items-center gap-3 text-sm cursor-pointer select-none ${updatingId === p.id ? 'opacity-50' : ''}`}
+                onClick={() => updatingId !== p.id && handleToggle(p.id, p.completed)}
+              >
                 <span className={p.completed ? 'text-green-500' : 'text-gray-300'}>
                   {p.completed ? '✓' : '○'}
                 </span>
@@ -62,6 +87,21 @@ export default function Dashboard() {
             ))}
           </ul>
         )}
+      </div>
+
+      <div className="mt-4 bg-white rounded-xl shadow p-5">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-gray-600">
+            {reviewCount > 0
+              ? `今天有 ${reviewCount} 道错题待复习`
+              : '今天暂无需要复习的错题'}
+          </span>
+          {reviewCount > 0 && (
+            <Link to="/errors?filter=review" className="text-sm text-blue-600 hover:text-blue-800">
+              去复习 →
+            </Link>
+          )}
+        </div>
       </div>
     </div>
   );

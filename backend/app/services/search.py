@@ -146,7 +146,6 @@ async def index_chunks(session: AsyncSession, material_id: int, content: str):
             text("INSERT INTO chunks_fts (content, chunk_id, material_id) VALUES (:content, :cid, :mid)"),
             {"content": chunk_text, "cid": record.id, "mid": material_id},
         )
-    await session.commit()
 
 
 async def search_chunks(session: AsyncSession, query: str, limit: int = 10) -> list[dict]:
@@ -245,4 +244,4 @@ async def delete_chunks_for_material(session: AsyncSession, material_id: int):
         text("DELETE FROM material_chunks WHERE material_id = :mid"),
         {"mid": material_id},
     )
-    await session.commit()
+    await session.flush()

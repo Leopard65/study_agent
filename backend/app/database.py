@@ -26,3 +26,20 @@ async def init_db():
                 "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(content, chunk_id UNINDEXED, material_id UNINDEXED)"
             )
         )
+        # Lightweight migration: add stored_filename to materials if missing
+        result = await conn.execute(
+            __import__("sqlalchemy").text("PRAGMA table_info(materials)")
+        )
+        columns = [row[1] for row in result.fetchall()]
+        if "stored_filename" not in columns:
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE materials ADD COLUMN stored_filename VARCHAR(500) DEFAULT ''"
+                )
+            )
+        # Fix NULL values from old data (idempotent)
+        await conn.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE materials SET stored_filename = '' WHERE stored_filename IS NULL"
+            )
+        )

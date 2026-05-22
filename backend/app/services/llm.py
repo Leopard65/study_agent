@@ -4,6 +4,14 @@ from app.config import get_settings
 _client: AsyncOpenAI | None = None
 
 
+class LLMConfigError(Exception):
+    """AI 配置缺失（如未设置 API Key）。"""
+
+
+class LLMCallError(Exception):
+    """调用 LLM 接口失败。"""
+
+
 def get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
@@ -15,6 +23,16 @@ def get_client() -> AsyncOpenAI:
     return _client
 
 
+def _require_api_key() -> str:
+    """返回 model 名称，若 API Key 未配置则抛出 LLMConfigError。"""
+    settings = get_settings()
+    if not settings.openai_api_key.strip():
+        raise LLMConfigError(
+            "未配置 OPENAI_API_KEY，请在 backend/.env 中填写 API Key"
+        )
+    return settings.openai_model
+
+
 SYSTEM_PROMPT = (
     "你是一个考研学习助手，擅长数学、信号与系统等学科。"
     "回答问题时，涉及数学公式请使用 LaTeX 格式：行内公式用 $...$，独立公式用 $$...$$。"
@@ -23,23 +41,29 @@ SYSTEM_PROMPT = (
 
 
 async def chat(question: str, context: str | None = None) -> str:
+    model = _require_api_key()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if context:
         messages.append({"role": "user", "content": f"参考资料：\n{context}\n\n我的问题：{question}"})
     else:
         messages.append({"role": "user", "content": question})
 
-    model = get_settings().openai_model
-    response = await get_client().chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=4096,
-    )
+    try:
+        response = await get_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=4096,
+        )
+    except LLMConfigError:
+        raise
+    except Exception as e:
+        raise LLMCallError(f"AI 接口调用失败：{e}") from e
     return response.choices[0].message.content or ""
 
 
 async def solve_problem(question: str, subject: str = "") -> str:
+    model = _require_api_key()
     sys = SYSTEM_PROMPT
     if subject:
         sys += f"\n当前科目：{subject}"
@@ -47,17 +71,22 @@ async def solve_problem(question: str, subject: str = "") -> str:
         {"role": "system", "content": sys},
         {"role": "user", "content": f"请详细解析以下题目，给出完整的解题步骤和最终答案：\n{question}"},
     ]
-    model = get_settings().openai_model
-    response = await get_client().chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.5,
-        max_tokens=4096,
-    )
+    try:
+        response = await get_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.5,
+            max_tokens=4096,
+        )
+    except LLMConfigError:
+        raise
+    except Exception as e:
+        raise LLMCallError(f"AI 接口调用失败：{e}") from e
     return response.choices[0].message.content or ""
 
 
 async def generate_plan(subjects: list[str], daily_hours: int, days: int, start_date: str = "") -> str:
+    model = _require_api_key()
     subject_str = "、".join(subjects)
     date_hint = f"起始日期：{start_date}\n" if start_date else "起始日期：从明天开始\n"
     prompt = (
@@ -75,11 +104,15 @@ async def generate_plan(subjects: list[str], daily_hours: int, days: int, start_
         {"role": "system", "content": "你是考研学习规划师，请生成合理、可执行的学习计划。只输出 JSON 数组。"},
         {"role": "user", "content": prompt},
     ]
-    model = get_settings().openai_model
-    response = await get_client().chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.5,
-        max_tokens=4096,
-    )
+    try:
+        response = await get_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.5,
+            max_tokens=4096,
+        )
+    except LLMConfigError:
+        raise
+    except Exception as e:
+        raise LLMCallError(f"AI 接口调用失败：{e}") from e
     return response.choices[0].message.content or ""

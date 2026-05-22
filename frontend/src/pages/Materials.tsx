@@ -1,51 +1,57 @@
 import { useEffect, useState } from 'react';
-import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial } from '../api/client';
+import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getApiErrorMessage } from '../api/client';
+import type { MaterialItem, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
 
-interface Material {
-  id: number;
-  filename: string;
-  file_type: string;
-  created_at: string;
-}
-
-interface SearchResult {
-  material_id: number;
-  filename: string;
-  snippet: string;
-}
-
 export default function Materials() {
-  const [materials, setMaterials] = useState<Material[]>([]);
+  const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [results, setResults] = useState<MaterialSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  const [error, setError] = useState('');
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const load = () => listMaterials().then(setMaterials).catch(() => {});
   useEffect(() => { load(); }, []);
 
   const handleUpload = async (file: File) => {
-    await uploadMaterial(file);
-    load();
+    setError('');
+    try {
+      await uploadMaterial(file);
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '上传失败，请检查文件或后端服务。'));
+    }
   };
 
   const handleSearch = async () => {
     if (!query.trim()) return;
+    setError('');
     setSearching(true);
     try {
       const r = await searchMaterials(query);
       setResults(r);
-    } catch {
+    } catch (err) {
       setResults([]);
+      setError(getApiErrorMessage(err, '搜索失败，请检查后端服务。'));
     } finally {
       setSearching(false);
     }
   };
 
   const handleDelete = async (id: number) => {
-    await deleteMaterial(id);
-    load();
-    setResults(prev => prev.filter(r => r.material_id !== id));
+    if (deletingId === id) return;
+    setError('');
+    setDeletingId(id);
+    try {
+      await deleteMaterial(id);
+      load();
+      setResults(prev => prev.filter(r => r.material_id !== id));
+    } catch (err) {
+      setError(getApiErrorMessage(err, '删除失败，请检查后端服务。'));
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const typeLabel: Record<string, string> = {
@@ -81,6 +87,12 @@ export default function Materials() {
         </button>
       </div>
 
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       {/* Search Results */}
       {results.length > 0 && (
         <div className="mb-6">
@@ -103,7 +115,7 @@ export default function Materials() {
       ) : (
         <div className="grid gap-3">
           {materials.map(m => (
-            <div key={m.id} className="bg-white rounded-lg shadow p-4 flex items-center justify-between">
+            <div key={m.id} className={`bg-white rounded-lg shadow p-4 flex items-center justify-between ${deletingId === m.id ? 'opacity-50' : ''}`}>
               <div className="flex items-center gap-3">
                 <span className="px-2 py-1 bg-gray-100 rounded text-xs font-mono">
                   {typeLabel[m.file_type] || m.file_type}
@@ -112,10 +124,10 @@ export default function Materials() {
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-gray-400">
-                  {new Date(m.created_at).toLocaleDateString()}
+                  {m.created_at ? new Date(m.created_at).toLocaleDateString() : ''}
                 </span>
-                <button onClick={() => handleDelete(m.id)} className="text-red-400 hover:text-red-600 text-sm">
-                  删除
+                <button onClick={() => handleDelete(m.id)} disabled={deletingId === m.id} className="text-red-400 hover:text-red-600 disabled:opacity-50 text-sm">
+                  {deletingId === m.id ? '删除中...' : '删除'}
                 </button>
               </div>
             </div>

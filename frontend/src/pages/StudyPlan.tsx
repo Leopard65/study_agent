@@ -1,32 +1,42 @@
 import { useEffect, useState } from 'react';
-import { listPlans, createPlan, updatePlan, deletePlan, generatePlan } from '../api/client';
-
-interface PlanItem {
-  id: number;
-  date: string;
-  subject: string;
-  task: string;
-  completed: boolean;
-}
+import { listPlans, createPlan, updatePlan, deletePlan, generatePlan, getApiErrorMessage } from '../api/client';
+import type { StudyPlanItem } from '../api/client';
 
 export default function StudyPlan() {
-  const [plans, setPlans] = useState<PlanItem[]>([]);
+  const [plans, setPlans] = useState<StudyPlanItem[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showGen, setShowGen] = useState(false);
   const [form, setForm] = useState({ date: '', subject: '', task: '' });
   const [genForm, setGenForm] = useState({ subjects: '高等数学,线性代数,概率论', daily_hours: 8, start_date: '', days: 7 });
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState('');
+  const [error, setError] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [updatingId, setUpdatingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  const load = () => listPlans().then(setPlans).catch(() => {});
+  const load = () => {
+    setError('');
+    listPlans().then(setPlans).catch(err => {
+      setError(getApiErrorMessage(err, '加载计划失败，请检查后端服务。'));
+    });
+  };
   useEffect(() => { load(); }, []);
 
   const handleAdd = async () => {
     if (!form.date || !form.subject || !form.task) return;
-    await createPlan(form);
-    setForm({ date: '', subject: '', task: '' });
-    setShowAdd(false);
-    load();
+    setError('');
+    setAdding(true);
+    try {
+      await createPlan(form);
+      setForm({ date: '', subject: '', task: '' });
+      setShowAdd(false);
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '添加计划失败，请检查后端服务。'));
+    } finally {
+      setAdding(false);
+    }
   };
 
   const handleGenerate = async () => {
@@ -45,24 +55,42 @@ export default function StudyPlan() {
         setShowGen(false);
         load();
       }
-    } catch {
-      setGenError('请求失败，请检查后端服务是否运行。');
+    } catch (err) {
+      setGenError(getApiErrorMessage(err, 'AI 生成计划失败，请检查后端服务。'));
     } finally {
       setGenerating(false);
     }
   };
 
-  const toggleDone = async (item: PlanItem) => {
-    await updatePlan(item.id, !item.completed);
-    load();
+  const toggleDone = async (item: StudyPlanItem) => {
+    if (updatingId === item.id || deletingId === item.id) return;
+    setError('');
+    setUpdatingId(item.id);
+    try {
+      await updatePlan(item.id, !item.completed);
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '更新计划状态失败，请检查后端服务。'));
+    } finally {
+      setUpdatingId(null);
+    }
   };
 
   const handleDelete = async (id: number) => {
-    await deletePlan(id);
-    load();
+    if (updatingId === id || deletingId === id) return;
+    setError('');
+    setDeletingId(id);
+    try {
+      await deletePlan(id);
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '删除计划失败，请检查后端服务。'));
+    } finally {
+      setDeletingId(null);
+    }
   };
 
-  const grouped = plans.reduce<Record<string, PlanItem[]>>((acc, p) => {
+  const grouped = plans.reduce<Record<string, StudyPlanItem[]>>((acc, p) => {
     (acc[p.date] ??= []).push(p);
     return acc;
   }, {});
@@ -75,11 +103,17 @@ export default function StudyPlan() {
           <button onClick={() => { setShowGen(!showGen); setShowAdd(false); setGenError(''); }} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm">
             {showGen ? '取消' : 'AI 生成计划'}
           </button>
-          <button onClick={() => { setShowAdd(!showAdd); setShowGen(false); }} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">
+          <button onClick={() => { setShowAdd(!showAdd); setShowGen(false); setError(''); }} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">
             {showAdd ? '取消' : '手动添加'}
           </button>
         </div>
       </div>
+
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       {showGen && (
         <div className="bg-white rounded-xl shadow p-5 mb-6">
@@ -120,7 +154,7 @@ export default function StudyPlan() {
             <input className="border rounded-lg px-3 py-2 text-sm" placeholder="科目" value={form.subject} onChange={e => setForm({ ...form, subject: e.target.value })} />
             <input className="border rounded-lg px-3 py-2 text-sm" placeholder="任务内容" value={form.task} onChange={e => setForm({ ...form, task: e.target.value })} />
           </div>
-          <button onClick={handleAdd} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm">添加</button>
+          <button onClick={handleAdd} disabled={adding} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm">{adding ? '添加中...' : '添加'}</button>
         </div>
       )}
 
@@ -133,23 +167,27 @@ export default function StudyPlan() {
             <div key={date} className="mb-6">
               <h3 className="text-sm font-semibold text-gray-500 mb-2">{date}</h3>
               <div className="space-y-2">
-                {items.map(item => (
-                  <div key={item.id} className="bg-white rounded-lg shadow p-4 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => toggleDone(item)}
-                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center text-xs ${
-                          item.completed ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300'
-                        }`}
-                      >
-                        {item.completed ? '✓' : ''}
-                      </button>
-                      <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{item.subject}</span>
-                      <span className={`text-sm ${item.completed ? 'line-through text-gray-400' : 'text-gray-700'}`}>{item.task}</span>
+                {items.map(item => {
+                  const rowBusy = updatingId === item.id || deletingId === item.id;
+                  return (
+                    <div key={item.id} className={`bg-white rounded-lg shadow p-4 flex items-center justify-between ${rowBusy ? 'opacity-50' : ''}`}>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => toggleDone(item)}
+                          disabled={rowBusy}
+                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center text-xs ${
+                            item.completed ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300'
+                          }`}
+                        >
+                          {item.completed ? '✓' : ''}
+                        </button>
+                        <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{item.subject}</span>
+                        <span className={`text-sm ${item.completed ? 'line-through text-gray-400' : 'text-gray-700'}`}>{item.task}</span>
+                      </div>
+                      <button onClick={() => handleDelete(item.id)} disabled={rowBusy} className="text-red-400 hover:text-red-600 disabled:opacity-50 text-xs">{deletingId === item.id ? '删除中...' : '删除'}</button>
                     </div>
-                    <button onClick={() => handleDelete(item.id)} className="text-red-400 hover:text-red-600 text-xs">删除</button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))

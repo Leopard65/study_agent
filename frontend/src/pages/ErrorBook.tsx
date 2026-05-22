@@ -1,24 +1,9 @@
 import { useEffect, useState } from 'react';
-import { listErrors, createError, updateError, deleteError } from '../api/client';
+import { useSearchParams } from 'react-router-dom';
+import { listErrors, createError, updateError, deleteError, getApiErrorMessage } from '../api/client';
+import type { ErrorBookItem } from '../api/client';
 import LatexRenderer from '../components/LatexRenderer';
-
-interface ErrorItem {
-  id: number;
-  subject: string;
-  chapter: string;
-  knowledge_point: string;
-  question: string;
-  user_answer: string;
-  correct_answer: string;
-  error_type: string;
-  error_reason: string;
-  correct_approach: string;
-  review_suggestion: string;
-  tags: string;
-  next_review_date: string;
-  mastered: boolean;
-  created_at: string;
-}
+import { formatLocalDate } from '../utils/date';
 
 const emptyForm = {
   subject: '', chapter: '', knowledge_point: '', question: '',
@@ -26,36 +11,95 @@ const emptyForm = {
   correct_approach: '', review_suggestion: '', tags: '', next_review_date: '',
 };
 
+const validFilters = ['all', 'unmastered', 'mastered', 'review'] as const;
+type Filter = (typeof validFilters)[number];
+
+function isValidFilter(v: string | null): v is Filter {
+  return v !== null && validFilters.includes(v as Filter);
+}
+
+function getFilterFromSearchParams(sp: URLSearchParams): Filter {
+  const v = sp.get('filter');
+  return isValidFilter(v) ? v : 'all';
+}
+
 export default function ErrorBook() {
-  const [errors, setErrors] = useState<ErrorItem[]>([]);
-  const [filter, setFilter] = useState<'all' | 'unmastered' | 'mastered'>('all');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [filter, setFilter] = useState<Filter>(getFilterFromSearchParams(searchParams));
+
+  useEffect(() => {
+    setFilter(getFilterFromSearchParams(searchParams));
+  }, [searchParams]);
+  const [errors, setErrors] = useState<ErrorBookItem[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [updatingId, setUpdatingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const load = () => {
+    setError('');
     const mastered = filter === 'all' ? undefined : filter === 'mastered';
-    listErrors(mastered).then(setErrors).catch(() => {});
+    if (filter === 'review') {
+      const today = formatLocalDate();
+      listErrors(false).then(all => {
+        setErrors(all.filter((e: ErrorBookItem) => e.next_review_date && e.next_review_date <= today));
+      }).catch(err => {
+        setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
+      });
+    } else {
+      listErrors(mastered).then(setErrors).catch(err => {
+        setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
+      });
+    }
   };
 
   useEffect(() => { load(); }, [filter]);
 
   const handleAdd = async () => {
     if (!form.question.trim()) return;
-    await createError(form);
-    setForm(emptyForm);
-    setShowAdd(false);
-    load();
+    setError('');
+    setAdding(true);
+    try {
+      await createError(form);
+      setForm(emptyForm);
+      setShowAdd(false);
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '保存错题失败，请检查后端服务。'));
+    } finally {
+      setAdding(false);
+    }
   };
 
-  const toggleMastered = async (item: ErrorItem) => {
-    await updateError(item.id, { mastered: !item.mastered });
-    load();
+  const toggleMastered = async (item: ErrorBookItem) => {
+    if (updatingId === item.id || deletingId === item.id) return;
+    setError('');
+    setUpdatingId(item.id);
+    try {
+      await updateError(item.id, { mastered: !item.mastered });
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '更新错题状态失败，请检查后端服务。'));
+    } finally {
+      setUpdatingId(null);
+    }
   };
 
   const handleDelete = async (id: number) => {
-    await deleteError(id);
-    load();
+    if (updatingId === id || deletingId === id) return;
+    setError('');
+    setDeletingId(id);
+    try {
+      await deleteError(id);
+      load();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '删除错题失败，请检查后端服务。'));
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const set = (key: string, val: string) => setForm(f => ({ ...f, [key]: val }));
@@ -73,18 +117,24 @@ export default function ErrorBook() {
       </div>
 
       <div className="flex gap-2 mb-4">
-        {(['all', 'unmastered', 'mastered'] as const).map(f => (
+        {(['all', 'unmastered', 'mastered', 'review'] as const).map(f => (
           <button
             key={f}
-            onClick={() => setFilter(f)}
+            onClick={() => { setError(''); setFilter(f); if (f === 'all') { setSearchParams({}); } else { setSearchParams({ filter: f }); } }}
             className={`px-3 py-1.5 rounded-lg text-sm ${
               filter === f ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
-            {{ all: '全部', unmastered: '未掌握', mastered: '已掌握' }[f]}
+            {{ all: '全部', unmastered: '未掌握', mastered: '已掌握', review: '今日复习' }[f]}
           </button>
         ))}
       </div>
+
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       {showAdd && (
         <div className="bg-white rounded-xl shadow p-5 mb-6">
@@ -108,16 +158,20 @@ export default function ErrorBook() {
             <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none" placeholder="正确思路" value={form.correct_approach} onChange={e => set('correct_approach', e.target.value)} />
             <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none" placeholder="复习建议" value={form.review_suggestion} onChange={e => set('review_suggestion', e.target.value)} />
           </div>
-          <button onClick={handleAdd} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm">保存</button>
+          <button onClick={handleAdd} disabled={adding} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm">{adding ? '保存中...' : '保存'}</button>
         </div>
       )}
 
       {errors.length === 0 ? (
-        <p className="text-gray-400 text-sm">暂无错题</p>
+        <p className="text-gray-400 text-sm">
+          {filter === 'review' ? '今天暂无需要复习的错题' : '暂无错题'}
+        </p>
       ) : (
         <div className="space-y-3">
-          {errors.map(item => (
-            <div key={item.id} className={`bg-white rounded-xl shadow p-5 ${item.mastered ? 'opacity-60' : ''}`}>
+          {errors.map(item => {
+            const rowBusy = updatingId === item.id || deletingId === item.id;
+            return (
+            <div key={item.id} className={`bg-white rounded-xl shadow p-5 ${rowBusy ? 'opacity-50' : ''} ${item.mastered && !rowBusy ? 'opacity-60' : ''}`}>
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2 flex-wrap">
                   {item.subject && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{item.subject}</span>}
@@ -130,13 +184,13 @@ export default function ErrorBook() {
                 </div>
                 <div className="flex items-center gap-2">
                   {item.next_review_date && <span className="text-xs text-gray-400">复习: {item.next_review_date}</span>}
-                  <button onClick={() => toggleMastered(item)} className={`text-xs px-2 py-1 rounded ${item.mastered ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                  <button onClick={() => toggleMastered(item)} disabled={rowBusy} className={`text-xs px-2 py-1 rounded ${item.mastered ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                     {item.mastered ? '已掌握' : '标记掌握'}
                   </button>
                   <button onClick={() => setExpandedId(expandedId === item.id ? null : item.id)} className="text-blue-400 hover:text-blue-600 text-xs">
                     {expandedId === item.id ? '收起' : '展开'}
                   </button>
-                  <button onClick={() => handleDelete(item.id)} className="text-red-400 hover:text-red-600 text-xs">删除</button>
+                  <button onClick={() => handleDelete(item.id)} disabled={rowBusy} className="text-red-400 hover:text-red-600 disabled:opacity-50 text-xs">{deletingId === item.id ? '删除中...' : '删除'}</button>
                 </div>
               </div>
 
@@ -154,7 +208,8 @@ export default function ErrorBook() {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
