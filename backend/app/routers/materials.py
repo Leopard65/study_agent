@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import Material
-from app.schemas import MaterialItem, SearchRequest, SearchResult
+from app.schemas import MaterialItem, MaterialDetail, SearchRequest, SearchResult
 from app.services.doc_parser import extract_text
 from app.services.search import index_chunks, search_chunks, delete_chunks_for_material
 from app.config import get_settings
@@ -38,12 +38,29 @@ async def upload(file: UploadFile = File(...), db: AsyncSession = Depends(get_db
     if ext not in allowed:
         raise HTTPException(400, f"不支持的文件类型: {ext}")
 
+    max_bytes = settings.max_upload_mb * 1024 * 1024
     os.makedirs(settings.upload_dir, exist_ok=True)
     save_name = f"{uuid.uuid4().hex}{ext}"
     save_path = os.path.join(settings.upload_dir, save_name)
-    with open(save_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+
+    total_size = 0
+    chunk_size = 1024 * 1024  # 1MB
+    try:
+        with open(save_path, "wb") as f:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > max_bytes:
+                    raise HTTPException(413, f"文件过大，最大支持 {settings.max_upload_mb}MB")
+                f.write(chunk)
+    except HTTPException:
+        _delete_uploaded_file(save_name)
+        raise
+    except Exception:
+        _delete_uploaded_file(save_name)
+        raise
 
     try:
         text_content = extract_text(save_path)
@@ -64,8 +81,16 @@ async def upload(file: UploadFile = File(...), db: AsyncSession = Depends(get_db
 
 
 @router.get("", response_model=list[MaterialItem])
-async def list_materials(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Material).order_by(Material.created_at.desc()))
+async def list_materials(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    result = await db.execute(
+        select(Material).order_by(Material.created_at.desc()).offset(offset).limit(limit)
+    )
     return result.scalars().all()
 
 
@@ -83,6 +108,25 @@ async def search(req: SearchRequest, db: AsyncSession = Depends(get_db)):
         if mat:
             results.append(SearchResult(material_id=mat.id, filename=mat.filename, snippet=hit["snippet"]))
     return results
+
+
+@router.get("/{material_id}", response_model=MaterialDetail)
+async def get_material(material_id: int, db: AsyncSession = Depends(get_db)):
+    mat = await db.get(Material, material_id)
+    if not mat:
+        raise HTTPException(404, "资料不存在")
+    content = mat.content or ""
+    preview_limit = max(0, settings.material_preview_chars)
+    return MaterialDetail(
+        id=mat.id,
+        filename=mat.filename,
+        file_type=mat.file_type,
+        stored_filename=mat.stored_filename or "",
+        preview=content[:preview_limit] if preview_limit else "",
+        content_length=len(content),
+        truncated=len(content) > preview_limit if preview_limit else bool(content),
+        created_at=mat.created_at,
+    )
 
 
 @router.delete("/{material_id}")

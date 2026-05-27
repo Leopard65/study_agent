@@ -15,6 +15,8 @@ _uploads_dir = os.path.join(_tmp_dir, "uploads")
 
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db_path}"
 os.environ["UPLOAD_DIR"] = _uploads_dir
+os.environ["MAX_UPLOAD_MB"] = "1"
+os.environ["MATERIAL_PREVIEW_CHARS"] = "5000"
 
 import asyncio
 
@@ -77,6 +79,86 @@ def run(client: TestClient):
     stored_filename = body["stored_filename"]
     check("stored_filename not empty", bool(stored_filename))
 
+    # ── 2b. List materials pagination ──
+    print("\n[2b] GET /api/materials?limit=1&offset=0")
+    r = client.get("/api/materials", params={"limit": 1, "offset": 0})
+    check("list page1 200", r.status_code == 200, f"got {r.status_code}")
+    page1 = r.json()
+    check("page1 is list", isinstance(page1, list))
+    check("page1 length <= 1", len(page1) <= 1, f"got {len(page1)}")
+    if len(page1) == 1:
+        check("page1 first id matches", page1[0]["id"] == material_id)
+
+    print("\n[2c] GET /api/materials?limit=1&offset=1")
+    r = client.get("/api/materials", params={"limit": 1, "offset": 1})
+    check("list page2 200", r.status_code == 200, f"got {r.status_code}")
+    page2 = r.json()
+    check("page2 is empty list", page2 == [], f"got {page2}")
+
+    # ── 2d. Pagination clamp (limit/offset out of range) ──
+    print("\n[2d] GET /api/materials?limit=999&offset=-10")
+    r = client.get("/api/materials", params={"limit": 999, "offset": -10})
+    check("clamp 200", r.status_code == 200, f"got {r.status_code}")
+    clamp_result = r.json()
+    check("clamp returns list", isinstance(clamp_result, list))
+
+    # ── 2e. Dashboard reflects uploaded material ──
+    print("\n[2e] GET /api/dashboard (after upload)")
+    r = client.get("/api/dashboard")
+    check("dashboard after upload 200", r.status_code == 200)
+    dash_after = r.json()
+    check("total_materials >= 1", dash_after["total_materials"] >= 1, f"got {dash_after['total_materials']}")
+
+    # ── 2f. Material detail ──
+    print("\n[2f] GET /api/materials/{id}")
+    r = client.get(f"/api/materials/{material_id}")
+    check("detail 200", r.status_code == 200, f"got {r.status_code}")
+    detail = r.json()
+    check("detail id matches", detail["id"] == material_id)
+    check("detail filename matches", detail["filename"] == "test_upload.txt")
+    check("detail preview has text", "冒烟测试" in detail.get("preview", ""))
+    check("detail content_length >= 4", detail.get("content_length", 0) >= 4)
+    check("detail truncated is False", detail.get("truncated") is False)
+
+    # ── 2g. Material detail truncation ──
+    print("\n[2g] GET /api/materials/{id} (truncation)")
+    from app.models import Material as MaterialModel
+
+    async def insert_large_material():
+        async with async_session() as session:
+            mat = MaterialModel(
+                filename="large_test.txt",
+                file_type=".txt",
+                content="a" * 6000,
+                stored_filename="large_test_stored.txt",
+            )
+            session.add(mat)
+            await session.commit()
+            await session.refresh(mat)
+            return mat.id
+
+    loop3 = asyncio.new_event_loop()
+    large_id = loop3.run_until_complete(insert_large_material())
+    loop3.close()
+
+    r = client.get(f"/api/materials/{large_id}")
+    check("large detail 200", r.status_code == 200, f"got {r.status_code}")
+    large_detail = r.json()
+    check("large preview length == 5000", len(large_detail.get("preview", "")) == 5000)
+    check("large content_length == 6000", large_detail.get("content_length") == 6000)
+    check("large truncated is True", large_detail.get("truncated") is True)
+
+    # cleanup large material
+    async def delete_large_material():
+        async with async_session() as session:
+            from sqlalchemy import text as sql_text
+            await session.execute(sql_text("DELETE FROM materials WHERE id = :id"), {"id": large_id})
+            await session.commit()
+
+    loop4 = asyncio.new_event_loop()
+    loop4.run_until_complete(delete_large_material())
+    loop4.close()
+
     # ── 3. Search material ──
     print("\n[3] POST /api/materials/search")
     r = client.post("/api/materials/search", json={"query": "冒烟测试", "limit": 10})
@@ -84,6 +166,15 @@ def run(client: TestClient):
     results = r.json()
     check("found at least 1 result", len(results) >= 1, f"got {len(results)}")
     check("result matches material_id", results[0]["material_id"] == material_id)
+
+    # ── 3b. Search limit boundary ──
+    print("\n[3b] POST /api/materials/search (limit=999)")
+    r = client.post("/api/materials/search", json={"query": "冒烟测试", "limit": 999})
+    check("search limit=999 returns 422", r.status_code == 422, f"got {r.status_code}")
+
+    print("\n[3c] POST /api/materials/search (limit=50)")
+    r = client.post("/api/materials/search", json={"query": "冒烟测试", "limit": 50})
+    check("search limit=50 returns 200", r.status_code == 200, f"got {r.status_code}")
 
     # ── 4. Delete material ──
     print("\n[4] DELETE /api/materials/{id}")
@@ -118,6 +209,42 @@ def run(client: TestClient):
     # verify file deleted
     upload_file = os.path.join(_uploads_dir, stored_filename)
     check("upload file removed", not os.path.exists(upload_file))
+
+    # verify detail returns 404 after deletion
+    print("\n[4c] GET /api/materials/{id} (after delete)")
+    r = client.get(f"/api/materials/{material_id}")
+    check("detail after delete 404", r.status_code == 404, f"got {r.status_code}")
+
+    # ── 4b. Oversized upload rejected ──
+    print("\n[4b] POST /api/materials/upload (oversized)")
+    files_before = sorted(os.listdir(_uploads_dir))
+    oversized_content = b"x" * (1024 * 1024 + 1)  # slightly over 1MB
+    from io import BytesIO
+    oversized_io = BytesIO(oversized_content)
+    r = client.post(
+        "/api/materials/upload",
+        files={"file": ("oversized.txt", oversized_io, "text/plain")},
+    )
+    check("oversized upload 413", r.status_code == 413, f"got {r.status_code}")
+    detail = r.json().get("detail", "")
+    check("detail contains 文件过大", "文件过大" in detail, f"detail={detail}")
+
+    files_after = sorted(os.listdir(_uploads_dir))
+    check("no residual files in upload dir", files_after == files_before, f"before={files_before}, after={files_after}")
+
+    # verify no DB record for oversized.txt
+    async def verify_no_oversized():
+        async with async_session() as session:
+            q = await session.execute(
+                text("SELECT COUNT(*) FROM materials WHERE filename = :fn"),
+                {"fn": "oversized.txt"},
+            )
+            return q.scalar() or 0
+
+    loop2 = asyncio.new_event_loop()
+    oversized_count = loop2.run_until_complete(verify_no_oversized())
+    loop2.close()
+    check("no oversized.txt in DB", oversized_count == 0, f"count={oversized_count}")
 
     # ── 5. Study Plan CRUD ──
     print("\n[5] POST /api/plan")

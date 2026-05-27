@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     tessdata_dir: str = ""
     ocr_min_text_chars: int = 80
     ocr_max_pages: int = 30
+    max_upload_mb: int = 50
+    material_preview_chars: int = 5000
 
     class Config:
         env_file = ".env"

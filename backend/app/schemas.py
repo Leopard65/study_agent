@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
 
@@ -36,9 +36,23 @@ class MaterialItem(BaseModel):
         from_attributes = True
 
 
+class MaterialDetail(BaseModel):
+    id: int
+    filename: str
+    file_type: str
+    stored_filename: Optional[str] = ""
+    preview: str = ""
+    content_length: int = 0
+    truncated: bool = False
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class SearchResult(BaseModel):

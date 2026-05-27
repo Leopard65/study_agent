@@ -23,6 +23,17 @@ export interface MaterialItem {
   created_at: string | null;
 }
 
+export interface MaterialDetail {
+  id: number;
+  filename: string;
+  file_type: string;
+  stored_filename: string | null;
+  preview: string;
+  content_length: number;
+  truncated: boolean;
+  created_at: string | null;
+}
+
 export interface MaterialSearchResult {
   material_id: number;
   filename: string;
@@ -105,11 +116,14 @@ export const uploadMaterial = (file: File): Promise<MaterialItem> => {
   return api.post<MaterialItem>('/materials/upload', fd).then(r => r.data);
 };
 
-export const listMaterials = (): Promise<MaterialItem[]> =>
-  api.get<MaterialItem[]>('/materials').then(r => r.data);
+export const listMaterials = (limit = 20, offset = 0): Promise<MaterialItem[]> =>
+  api.get<MaterialItem[]>('/materials', { params: { limit, offset } }).then(r => r.data);
 
 export const searchMaterials = (query: string, limit = 10): Promise<MaterialSearchResult[]> =>
   api.post<MaterialSearchResult[]>('/materials/search', { query, limit }).then(r => r.data);
+
+export const getMaterial = (id: number): Promise<MaterialDetail> =>
+  api.get<MaterialDetail>(`/materials/${id}`).then(r => r.data);
 
 export const deleteMaterial = (id: number): Promise<OkResponse> =>
   api.delete<OkResponse>(`/materials/${id}`).then(r => r.data);
