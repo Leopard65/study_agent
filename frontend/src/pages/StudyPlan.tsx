@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { listPlans, createPlan, updatePlan, deletePlan, generatePlan, getApiErrorMessage } from '../api/client';
 import type { StudyPlanItem } from '../api/client';
+
+function fetchPlans(): Promise<StudyPlanItem[]> {
+  return listPlans();
+}
 
 export default function StudyPlan() {
   const [plans, setPlans] = useState<StudyPlanItem[]>([]);
@@ -14,14 +18,30 @@ export default function StudyPlan() {
   const [adding, setAdding] = useState(false);
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const effectSeq = useRef(0);
 
-  const load = () => {
-    setError('');
-    listPlans().then(setPlans).catch(err => {
+  useEffect(() => {
+    const seq = ++effectSeq.current;
+    fetchPlans().then(items => {
+      if (seq !== effectSeq.current) return;
+      setError('');
+      setPlans(items);
+    }).catch(err => {
+      if (seq !== effectSeq.current) return;
       setError(getApiErrorMessage(err, '加载计划失败，请检查后端服务。'));
     });
-  };
-  useEffect(() => { load(); }, []);
+    return () => { effectSeq.current += 1; };
+  }, []);
+
+  const load = useCallback(async () => {
+    try {
+      const items = await fetchPlans();
+      setError('');
+      setPlans(items);
+    } catch (err) {
+      setError(getApiErrorMessage(err, '加载计划失败，请检查后端服务。'));
+    }
+  }, []);
 
   const handleAdd = async () => {
     if (!form.date || !form.subject || !form.task) return;
@@ -31,7 +51,7 @@ export default function StudyPlan() {
       await createPlan(form);
       setForm({ date: '', subject: '', task: '' });
       setShowAdd(false);
-      load();
+      await load();
     } catch (err) {
       setError(getApiErrorMessage(err, '添加计划失败，请检查后端服务。'));
     } finally {
@@ -53,7 +73,7 @@ export default function StudyPlan() {
         setGenError(`解析失败：${res.parse_error}\n\nAI 原始返回：\n${res.raw_response || '(空)'}`);
       } else {
         setShowGen(false);
-        load();
+        await load();
       }
     } catch (err) {
       setGenError(getApiErrorMessage(err, 'AI 生成计划失败，请检查后端服务。'));
@@ -68,7 +88,7 @@ export default function StudyPlan() {
     setUpdatingId(item.id);
     try {
       await updatePlan(item.id, !item.completed);
-      load();
+      await load();
     } catch (err) {
       setError(getApiErrorMessage(err, '更新计划状态失败，请检查后端服务。'));
     } finally {
@@ -82,7 +102,7 @@ export default function StudyPlan() {
     setDeletingId(id);
     try {
       await deletePlan(id);
-      load();
+      await load();
     } catch (err) {
       setError(getApiErrorMessage(err, '删除计划失败，请检查后端服务。'));
     } finally {

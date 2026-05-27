@@ -298,7 +298,7 @@ cd ../frontend
 npm run build
 ```
 
-截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、学习计划 CRUD、错题本 CRUD、自动复习节奏、工作台统计，结果为 `98 passed, 0 failed`。
+截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏、工作台统计，结果为 `105 passed, 0 failed`。
 
 ## License
 

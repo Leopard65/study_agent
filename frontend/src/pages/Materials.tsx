@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, getApiErrorMessage } from '../api/client';
 import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
 
 const PAGE_SIZE = 20;
+
+function fetchFirstMaterials(): Promise<MaterialItem[]> {
+  return listMaterials(PAGE_SIZE, 0);
+}
 
 export default function Materials() {
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
@@ -13,18 +17,35 @@ export default function Materials() {
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState('');
   const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [loadingMaterials, setLoadingMaterials] = useState(false);
+  const [loadingMaterials, setLoadingMaterials] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialDetail | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState<number | null>(null);
   const [detailError, setDetailError] = useState('');
+  const effectSeq = useRef(0);
 
-  const loadFirstPage = async () => {
+  useEffect(() => {
+    const seq = ++effectSeq.current;
+    fetchFirstMaterials().then(items => {
+      if (seq !== effectSeq.current) return;
+      setMaterials(items);
+      setHasMore(items.length === PAGE_SIZE);
+    }).catch(err => {
+      if (seq !== effectSeq.current) return;
+      setError(getApiErrorMessage(err, '加载资料失败，请检查后端服务。'));
+    }).finally(() => {
+      if (seq !== effectSeq.current) return;
+      setLoadingMaterials(false);
+    });
+    return () => { effectSeq.current += 1; };
+  }, []);
+
+  const loadFirstPage = useCallback(async () => {
     setLoadingMaterials(true);
     setError('');
     try {
-      const items = await listMaterials(PAGE_SIZE, 0);
+      const items = await fetchFirstMaterials();
       setMaterials(items);
       setHasMore(items.length === PAGE_SIZE);
     } catch (err) {
@@ -32,8 +53,7 @@ export default function Materials() {
     } finally {
       setLoadingMaterials(false);
     }
-  };
-  useEffect(() => { loadFirstPage(); }, []);
+  }, []);
 
   const handleLoadMore = async () => {
     if (loadingMore || !hasMore) return;

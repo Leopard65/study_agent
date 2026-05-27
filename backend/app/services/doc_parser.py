@@ -44,7 +44,7 @@ def _ocr_pdf(file_path: str, settings) -> str:
 
     from app.services.ocr import configure_tesseract
 
-    tesseract_config = configure_tesseract(settings)
+    configure_tesseract(settings)
 
     with fitz.open(file_path) as doc:
         pages_to_process = min(len(doc), settings.ocr_max_pages)
@@ -56,7 +56,6 @@ def _ocr_pdf(file_path: str, settings) -> str:
             page_text = pytesseract.image_to_string(
                 img,
                 lang=settings.ocr_lang,
-                config=tesseract_config,
             )
             if page_text.strip():
                 texts.append(page_text.strip())

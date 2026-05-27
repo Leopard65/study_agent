@@ -56,14 +56,18 @@ async def health():
 
     # OCR availability check
     ocr_available = False
+    ocr_detail = ""
     try:
         from app.services.ocr import get_available_languages
 
         available_languages = set(get_available_languages(settings))
         required_languages = set(settings.ocr_lang.split("+"))
         ocr_available = required_languages.issubset(available_languages)
-    except Exception:
-        pass
+        if not ocr_available:
+            missing = required_languages - available_languages
+            ocr_detail = f"missing languages: {', '.join(missing)}"
+    except Exception as e:
+        ocr_detail = str(e)
 
     overall = "ok" if db_status == "ok" and upload_status == "ok" else "degraded"
 
@@ -77,4 +81,6 @@ async def health():
     }
     if detail_parts:
         result["detail"] = "; ".join(detail_parts)
+    if ocr_detail:
+        result["ocr_detail"] = ocr_detail
     return result

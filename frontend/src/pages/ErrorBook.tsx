@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { listErrors, createError, updateError, deleteError, getApiErrorMessage } from '../api/client';
 import type { ErrorBookItem } from '../api/client';
@@ -23,13 +23,20 @@ function getFilterFromSearchParams(sp: URLSearchParams): Filter {
   return isValidFilter(v) ? v : 'all';
 }
 
+function fetchErrorsByFilter(filter: Filter): Promise<ErrorBookItem[]> {
+  const mastered = filter === 'all' ? undefined : filter === 'mastered';
+  if (filter === 'review') {
+    const today = formatLocalDate();
+    return listErrors(false).then(all =>
+      all.filter((e: ErrorBookItem) => e.next_review_date && e.next_review_date <= today)
+    );
+  }
+  return listErrors(mastered);
+}
+
 export default function ErrorBook() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [filter, setFilter] = useState<Filter>(getFilterFromSearchParams(searchParams));
-
-  useEffect(() => {
-    setFilter(getFilterFromSearchParams(searchParams));
-  }, [searchParams]);
+  const filter = getFilterFromSearchParams(searchParams);
   const [errors, setErrors] = useState<ErrorBookItem[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -38,25 +45,30 @@ export default function ErrorBook() {
   const [adding, setAdding] = useState(false);
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const effectSeq = useRef(0);
 
-  const load = () => {
-    setError('');
-    const mastered = filter === 'all' ? undefined : filter === 'mastered';
-    if (filter === 'review') {
-      const today = formatLocalDate();
-      listErrors(false).then(all => {
-        setErrors(all.filter((e: ErrorBookItem) => e.next_review_date && e.next_review_date <= today));
-      }).catch(err => {
-        setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
-      });
-    } else {
-      listErrors(mastered).then(setErrors).catch(err => {
-        setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
-      });
+  useEffect(() => {
+    const seq = ++effectSeq.current;
+    fetchErrorsByFilter(filter).then(items => {
+      if (seq !== effectSeq.current) return;
+      setError('');
+      setErrors(items);
+    }).catch(err => {
+      if (seq !== effectSeq.current) return;
+      setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
+    });
+    return () => { effectSeq.current += 1; };
+  }, [filter]);
+
+  const loadErrors = useCallback(async () => {
+    try {
+      const items = await fetchErrorsByFilter(filter);
+      setError('');
+      setErrors(items);
+    } catch (err) {
+      setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
     }
-  };
-
-  useEffect(() => { load(); }, [filter]);
+  }, [filter]);
 
   const handleAdd = async () => {
     if (!form.question.trim()) return;
@@ -66,7 +78,7 @@ export default function ErrorBook() {
       await createError(form);
       setForm(emptyForm);
       setShowAdd(false);
-      load();
+      await loadErrors();
     } catch (err) {
       setError(getApiErrorMessage(err, '保存错题失败，请检查后端服务。'));
     } finally {
@@ -80,7 +92,7 @@ export default function ErrorBook() {
     setUpdatingId(item.id);
     try {
       await updateError(item.id, { mastered: !item.mastered });
-      load();
+      await loadErrors();
     } catch (err) {
       setError(getApiErrorMessage(err, '更新错题状态失败，请检查后端服务。'));
     } finally {
@@ -94,7 +106,7 @@ export default function ErrorBook() {
     setDeletingId(id);
     try {
       await deleteError(id);
-      load();
+      await loadErrors();
     } catch (err) {
       setError(getApiErrorMessage(err, '删除错题失败，请检查后端服务。'));
     } finally {
@@ -120,7 +132,7 @@ export default function ErrorBook() {
         {(['all', 'unmastered', 'mastered', 'review'] as const).map(f => (
           <button
             key={f}
-            onClick={() => { setError(''); setFilter(f); if (f === 'all') { setSearchParams({}); } else { setSearchParams({ filter: f }); } }}
+            onClick={() => { setError(''); if (f === 'all') { setSearchParams({}); } else { setSearchParams({ filter: f }); } }}
             className={`px-3 py-1.5 rounded-lg text-sm ${
               filter === f ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}

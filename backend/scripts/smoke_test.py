@@ -211,7 +211,7 @@ def run(client: TestClient):
     check("upload file removed", not os.path.exists(upload_file))
 
     # verify detail returns 404 after deletion
-    print("\n[4c] GET /api/materials/{id} (after delete)")
+    print("\n[4a] GET /api/materials/{id} (after delete)")
     r = client.get(f"/api/materials/{material_id}")
     check("detail after delete 404", r.status_code == 404, f"got {r.status_code}")
 
@@ -245,6 +245,69 @@ def run(client: TestClient):
     oversized_count = loop2.run_until_complete(verify_no_oversized())
     loop2.close()
     check("no oversized.txt in DB", oversized_count == 0, f"count={oversized_count}")
+
+    # ── 4c. OCR fallback: image-only PDF ──
+    print("\n[4c] OCR fallback: upload image-only PDF")
+    import fitz
+    from PIL import Image, ImageDraw, ImageFont
+
+    ocr_marker = "OCR SMOKE FOURIER 12345"
+    img = Image.new("RGB", (1200, 200), "white")
+    draw = ImageDraw.Draw(img)
+
+    # Try common Windows fonts, fallback to Pillow default
+    font = None
+    for font_name in ("arial.ttf", "Arial.ttf", "C:/Windows/Fonts/arial.ttf"):
+        try:
+            font = ImageFont.truetype(font_name, 60)
+            break
+        except (OSError, IOError):
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    draw.text((40, 50), ocr_marker, fill="black", font=font)
+    img_path = os.path.join(_tmp_dir, "ocr_page.png")
+    img.save(img_path)
+
+    ocr_pdf_path = os.path.join(_tmp_dir, "ocr_test.pdf")
+    ocr_doc = fitz.open()
+    pdf_page = ocr_doc.new_page(width=612, height=792)
+    pdf_page.insert_image(fitz.Rect(36, 100, 576, 300), filename=img_path)
+    ocr_doc.save(ocr_pdf_path)
+    ocr_doc.close()
+
+    ocr_material_id = None
+    ocr_stored_filename = None
+    with open(ocr_pdf_path, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("ocr_test.pdf", f, "application/pdf")})
+    check("ocr upload 200", r.status_code == 200, f"got {r.status_code}")
+    ocr_body = r.json()
+    ocr_material_id = ocr_body["id"]
+    ocr_stored_filename = ocr_body["stored_filename"]
+    check("ocr has id", ocr_material_id is not None)
+
+    r = client.get(f"/api/materials/{ocr_material_id}")
+    check("ocr detail 200", r.status_code == 200, f"got {r.status_code}")
+    ocr_detail = r.json()
+    ocr_preview = ocr_detail.get("preview", "")
+
+    # Check OCR availability; require content assertion when available
+    hr = client.get("/api/health")
+    ocr_available = hr.json().get("ocr_available", False)
+    if ocr_available:
+        has_ocr_text = any(kw in ocr_preview for kw in ("OCR", "FOURIER", "12345"))
+        check("ocr preview contains marker", has_ocr_text, f"preview={ocr_preview[:200]}")
+    else:
+        ocr_reason = hr.json().get("ocr_detail", "unknown")
+        print(f"  SKIP  ocr content assertion — OCR not available: {ocr_reason}")
+
+    # cleanup OCR material
+    r = client.delete(f"/api/materials/{ocr_material_id}")
+    check("ocr delete 200", r.status_code == 200)
+    check("ocr ok=true", r.json().get("ok") is True)
+    ocr_upload_file = os.path.join(_uploads_dir, ocr_stored_filename)
+    check("ocr upload file removed", not os.path.exists(ocr_upload_file))
 
     # ── 5. Study Plan CRUD ──
     print("\n[5] POST /api/plan")
