@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -33,15 +34,31 @@ async def list_errors(
     return result.scalars().all()
 
 
+REVIEW_INTERVALS = {1: 1, 2: 3, 3: 7}  # review_count -> days
+
+
 @router.patch("/{error_id}", response_model=ErrorBookItem)
 async def update_error(error_id: int, req: ErrorBookUpdate, db: AsyncSession = Depends(get_db)):
     record = await db.get(ErrorBook, error_id)
     if not record:
         raise HTTPException(404, "错题不存在")
+
     if req.mastered is not None:
-        record.mastered = req.mastered
+        old_mastered = record.mastered
+        new_mastered = req.mastered
+        if not old_mastered and new_mastered:
+            record.review_count = (record.review_count or 0) + 1
+            interval = REVIEW_INTERVALS.get(record.review_count, 14)
+            record.next_review_date = (date.today() + timedelta(days=interval)).isoformat()
+            record.mastered = True
+        elif old_mastered and not new_mastered:
+            record.mastered = False
+            record.next_review_date = date.today().isoformat()
+
     if req.next_review_date is not None:
         record.next_review_date = req.next_review_date
+    if req.review_count is not None:
+        record.review_count = max(0, req.review_count)
     await db.commit()
     await db.refresh(record)
     return record

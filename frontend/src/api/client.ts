@@ -55,6 +55,7 @@ export interface ErrorBookItem {
   tags: string;
   next_review_date: string;
   mastered: boolean;
+  review_count: number;
   created_at: string | null;
 }
 
@@ -158,7 +159,7 @@ export const listErrors = (mastered?: boolean, subject?: string): Promise<ErrorB
   return api.get<ErrorBookItem[]>('/errors', { params }).then(r => r.data);
 };
 
-export const updateError = (id: number, data: { mastered?: boolean; next_review_date?: string }): Promise<ErrorBookItem> =>
+export const updateError = (id: number, data: { mastered?: boolean; next_review_date?: string; review_count?: number }): Promise<ErrorBookItem> =>
   api.patch<ErrorBookItem>(`/errors/${id}`, data).then(r => r.data);
 
 export const deleteError = (id: number): Promise<OkResponse> =>

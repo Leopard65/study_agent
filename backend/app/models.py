@@ -49,6 +49,7 @@ class ErrorBook(Base):
     tags = Column(String(500), default="")
     next_review_date = Column(String(10), default="")
     mastered = Column(Boolean, default=False)
+    review_count = Column(Integer, default=0)
     created_at = Column(DateTime, server_default=func.now())
 
 

@@ -43,3 +43,19 @@ async def init_db():
                 "UPDATE materials SET stored_filename = '' WHERE stored_filename IS NULL"
             )
         )
+        # Lightweight migration: add review_count to error_book if missing
+        result = await conn.execute(
+            __import__("sqlalchemy").text("PRAGMA table_info(error_book)")
+        )
+        columns = [row[1] for row in result.fetchall()]
+        if "review_count" not in columns:
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE error_book ADD COLUMN review_count INTEGER DEFAULT 0"
+                )
+            )
+        await conn.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE error_book SET review_count = 0 WHERE review_count IS NULL"
+            )
+        )

@@ -181,6 +181,7 @@ export default function ErrorBook() {
                   {item.tags && item.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
                     <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{tag}</span>
                   ))}
+                  <span className="px-2 py-0.5 bg-teal-100 text-teal-700 rounded text-xs">复习 {item.review_count} 次</span>
                 </div>
                 <div className="flex items-center gap-2">
                   {item.next_review_date && <span className="text-xs text-gray-400">复习: {item.next_review_date}</span>}

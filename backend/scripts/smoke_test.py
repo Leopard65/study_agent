@@ -284,11 +284,75 @@ def run(client: TestClient):
     error_id = err_body["id"]
     check("error has id", error_id is not None)
     check("error mastered=false", err_body["mastered"] is False)
+    check("error review_count=0", err_body.get("review_count") == 0)
 
-    print("\n[10] PATCH /api/errors/{id}")
+    print("\n[10] PATCH /api/errors/{id} (mastered=true, 1st review)")
+    from datetime import date as _date, timedelta as _td
     r = client.patch(f"/api/errors/{error_id}", json={"mastered": True})
     check("patch error 200", r.status_code == 200)
-    check("error mastered=true", r.json()["mastered"] is True)
+    err1 = r.json()
+    check("error mastered=true", err1["mastered"] is True)
+    check("review_count=1", err1.get("review_count") == 1)
+    expected_date1 = (_date.today() + _td(days=1)).isoformat()
+    check("next_review_date=tomorrow", err1.get("next_review_date") == expected_date1, f"got {err1.get('next_review_date')}")
+
+    print("\n[10b] PATCH /api/errors/{id} (mastered=false)")
+    r = client.patch(f"/api/errors/{error_id}", json={"mastered": False})
+    check("unmaster 200", r.status_code == 200)
+    err2 = r.json()
+    check("mastered=false", err2["mastered"] is False)
+    check("review_count still 1", err2.get("review_count") == 1)
+    expected_today = _date.today().isoformat()
+    check("next_review_date=today", err2.get("next_review_date") == expected_today, f"got {err2.get('next_review_date')}")
+
+    print("\n[10c] PATCH /api/errors/{id} (mastered=true, 2nd review)")
+    r = client.patch(f"/api/errors/{error_id}", json={"mastered": True})
+    check("re-master 200", r.status_code == 200)
+    err3 = r.json()
+    check("review_count=2", err3.get("review_count") == 2)
+    expected_date2 = (_date.today() + _td(days=3)).isoformat()
+    check("next_review_date=+3d", err3.get("next_review_date") == expected_date2, f"got {err3.get('next_review_date')}")
+
+    # ── 10d. Repeat mastered=true should NOT double-increment ──
+    print("\n[10d] PATCH /api/errors/{id} (mastered=true again)")
+    r = client.patch(f"/api/errors/{error_id}", json={"mastered": True})
+    check("repeat master 200", r.status_code == 200)
+    err3d = r.json()
+    check("still mastered=true", err3d["mastered"] is True)
+    check("review_count still 2", err3d.get("review_count") == 2, f"got {err3d.get('review_count')}")
+    check("next_review_date still +3d", err3d.get("next_review_date") == expected_date2, f"got {err3d.get('next_review_date')}")
+
+    # ── 10e. Explicit review_count lower-bound protection ──
+    print("\n[10e] PATCH /api/errors/{id} (review_count=-5)")
+    r = client.patch(f"/api/errors/{error_id}", json={"review_count": -5})
+    check("neg review_count 200", r.status_code == 200)
+    err3e = r.json()
+    check("review_count clamped to 0", err3e.get("review_count") == 0, f"got {err3e.get('review_count')}")
+
+    # ── 10f. Explicit next_review_date override ──
+    print("\n[10f] PATCH /api/errors/{id} (next_review_date=2099-01-01)")
+    r = client.patch(f"/api/errors/{error_id}", json={"next_review_date": "2099-01-01"})
+    check("explicit date 200", r.status_code == 200)
+    err3f = r.json()
+    check("next_review_date=2099-01-01", err3f.get("next_review_date") == "2099-01-01", f"got {err3f.get('next_review_date')}")
+
+    # ── 10g. Explicit review_count positive override ──
+    print("\n[10g] PATCH /api/errors/{id} (review_count=4)")
+    r = client.patch(f"/api/errors/{error_id}", json={"review_count": 4})
+    check("set review_count 200", r.status_code == 200)
+    err3g = r.json()
+    check("review_count=4", err3g.get("review_count") == 4, f"got {err3g.get('review_count')}")
+
+    # ── 10h. Unmaster then re-master at count 5 → interval 14d ──
+    print("\n[10h] PATCH /api/errors/{id} (unmaster then re-master)")
+    r = client.patch(f"/api/errors/{error_id}", json={"mastered": False})
+    check("unmaster for 10h 200", r.status_code == 200)
+    r = client.patch(f"/api/errors/{error_id}", json={"mastered": True})
+    check("re-master at count 5 200", r.status_code == 200)
+    err3h = r.json()
+    check("review_count=5", err3h.get("review_count") == 5, f"got {err3h.get('review_count')}")
+    expected_date5 = (_date.today() + _td(days=14)).isoformat()
+    check("next_review_date=+14d", err3h.get("next_review_date") == expected_date5, f"got {err3h.get('next_review_date')}")
 
     print("\n[11] GET /api/errors?mastered=true")
     r = client.get("/api/errors", params={"mastered": "true"})

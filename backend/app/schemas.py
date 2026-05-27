@@ -80,6 +80,7 @@ class ErrorBookCreate(BaseModel):
 class ErrorBookUpdate(BaseModel):
     mastered: Optional[bool] = None
     next_review_date: Optional[str] = None
+    review_count: Optional[int] = None
 
 
 class ErrorBookItem(BaseModel):
@@ -97,6 +98,7 @@ class ErrorBookItem(BaseModel):
     tags: str
     next_review_date: str
     mastered: bool
+    review_count: int = 0
     created_at: Optional[datetime] = None
 
     class Config:
