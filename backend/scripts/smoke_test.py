@@ -1347,6 +1347,67 @@ def run(client: TestClient):
     for eid in stats_errs:
         client.delete(f"/api/errors/{eid}")
 
+    # ── 24. Materials bulk operations ──
+    print("\n[24] POST /api/materials/bulk-delete (validation)")
+    r = client.post("/api/materials/bulk-delete", json={"ids": []})
+    check("empty ids 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/materials/bulk-delete", json={"ids": list(range(101))})
+    check("over 100 ids 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/materials/export-selected", json={"ids": []})
+    check("export empty ids 422", r.status_code == 422, f"got {r.status_code}")
+
+    # Upload test materials for bulk ops
+    print("\n[24b] Bulk delete with test data")
+    bulk_mat_ids = []
+    for i in range(3):
+        fpath = os.path.join(_tmp_dir, f"bulk_{i}.txt")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(f"批量测试资料 {i} 内容")
+        with open(fpath, "rb") as f:
+            r = client.post("/api/materials/upload", files={"file": (f"bulk_{i}.txt", f, "text/plain")})
+        check(f"upload bulk_{i} 200", r.status_code == 200)
+        bulk_mat_ids.append(r.json()["id"])
+
+    # Export selected
+    r = client.post("/api/materials/export-selected", json={"ids": bulk_mat_ids, "include_preview": True})
+    check("export selected 200", r.status_code == 200)
+    exp = r.json()
+    check("export selected_count=3", exp["selected_count"] == 3, f"got {exp['selected_count']}")
+    check("export materials len=3", len(exp["materials"]) == 3, f"got {len(exp['materials'])}")
+    check("export has id", "id" in exp["materials"][0])
+    check("export has filename", "filename" in exp["materials"][0])
+    check("export has file_type", "file_type" in exp["materials"][0])
+    check("export has content_length", "content_length" in exp["materials"][0])
+    check("export has preview", "preview" in exp["materials"][0])
+    check("export no stored file", "stored_filename" not in exp["materials"][0])
+    check("export preview has content", len(exp["materials"][0]["preview"]) > 0)
+
+    # Export without preview
+    r = client.post("/api/materials/export-selected", json={"ids": bulk_mat_ids, "include_preview": False})
+    check("export no preview 200", r.status_code == 200)
+    check("export no preview field", "preview" not in r.json()["materials"][0])
+
+    # Bulk delete
+    r = client.post("/api/materials/bulk-delete", json={"ids": bulk_mat_ids})
+    check("bulk delete 200", r.status_code == 200)
+    bd = r.json()
+    check("bulk delete deleted=3", bd["deleted"] == 3, f"got {bd['deleted']}")
+    check("bulk delete missing=0", bd["missing"] == 0, f"got {bd['missing']}")
+
+    # Verify materials are gone
+    for mid in bulk_mat_ids:
+        r = client.get(f"/api/materials/{mid}")
+        check(f"material {mid} gone 404", r.status_code == 404, f"got {r.status_code}")
+
+    # Bulk delete with some missing
+    r = client.post("/api/materials/bulk-delete", json={"ids": [999998, 999999]})
+    check("bulk delete missing 200", r.status_code == 200)
+    bd2 = r.json()
+    check("bulk delete missing deleted=0", bd2["deleted"] == 0, f"got {bd2['deleted']}")
+    check("bulk delete missing=2", bd2["missing"] == 2, f"got {bd2['missing']}")
+
 
 # ── Main ──
 with TestClient(app) as client:

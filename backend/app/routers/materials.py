@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import Material
-from app.schemas import MaterialItem, MaterialDetail, SearchRequest, SearchResult
+from app.schemas import MaterialItem, MaterialDetail, SearchRequest, SearchResult, BulkDeleteRequest, ExportSelectedRequest
 from app.services.doc_parser import extract_text
 from app.services.search import index_chunks, search_chunks, delete_chunks_for_material
 from app.config import get_settings
@@ -108,6 +108,45 @@ async def search(req: SearchRequest, db: AsyncSession = Depends(get_db)):
         if mat:
             results.append(SearchResult(material_id=mat.id, filename=mat.filename, snippet=hit["snippet"]))
     return results
+
+
+@router.post("/bulk-delete")
+async def bulk_delete(req: BulkDeleteRequest, db: AsyncSession = Depends(get_db)):
+    deleted = 0
+    missing = 0
+    for mid in req.ids:
+        mat = await db.get(Material, mid)
+        if not mat:
+            missing += 1
+            continue
+        await delete_chunks_for_material(db, mid)
+        _delete_uploaded_file(mat.stored_filename or "")
+        await db.delete(mat)
+        deleted += 1
+    await db.commit()
+    return {"deleted": deleted, "missing": missing}
+
+
+@router.post("/export-selected")
+async def export_selected(req: ExportSelectedRequest, db: AsyncSession = Depends(get_db)):
+    items = []
+    for mid in req.ids:
+        mat = await db.get(Material, mid)
+        if not mat:
+            continue
+        entry = {
+            "id": mat.id,
+            "filename": mat.filename,
+            "file_type": mat.file_type,
+            "content_length": len(mat.content or ""),
+            "created_at": mat.created_at.isoformat() if mat.created_at else None,
+        }
+        if req.include_preview:
+            content = mat.content or ""
+            limit = max(0, settings.material_preview_chars)
+            entry["preview"] = content[:limit] if limit else ""
+        items.append(entry)
+    return {"selected_count": len(req.ids), "materials": items}
 
 
 @router.get("/{material_id}", response_model=MaterialDetail)

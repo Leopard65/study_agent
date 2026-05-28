@@ -148,6 +148,12 @@ export const getMaterial = (id: number): Promise<MaterialDetail> =>
 export const deleteMaterial = (id: number): Promise<OkResponse> =>
   api.delete<OkResponse>(`/materials/${id}`).then(r => r.data);
 
+export const bulkDeleteMaterials = (ids: number[]): Promise<{ deleted: number; missing: number }> =>
+  api.post<{ deleted: number; missing: number }>('/materials/bulk-delete', { ids }).then(r => r.data);
+
+export const exportSelectedMaterials = (ids: number[], includePreview = true): Promise<{ selected_count: number; materials: Record<string, unknown>[] }> =>
+  api.post('/materials/export-selected', { ids, include_preview: includePreview }).then(r => r.data);
+
 // ── Problems ──
 export const solveProblem = (question: string, subject?: string): Promise<{ solution: string }> =>
   api.post<{ solution: string }>('/problems/solve', { question, subject }).then(r => r.data);

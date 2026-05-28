@@ -59,6 +59,15 @@ class MaterialDetail(BaseModel):
         from_attributes = True
 
 
+class BulkDeleteRequest(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=100)
+
+
+class ExportSelectedRequest(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=100)
+    include_preview: bool = False
+
+
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=500)
     limit: int = Field(default=10, ge=1, le=50)

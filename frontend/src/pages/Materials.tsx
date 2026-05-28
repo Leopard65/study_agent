@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, getApiErrorMessage } from '../api/client';
+import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, getApiErrorMessage } from '../api/client';
 import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
 
@@ -49,6 +49,12 @@ export default function Materials() {
   const [detailLoadingId, setDetailLoadingId] = useState<number | null>(null);
   const [detailError, setDetailError] = useState('');
   const effectSeq = useRef(0);
+
+  // Bulk operations
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [exportingSelected, setExportingSelected] = useState(false);
 
   useEffect(() => {
     const seq = ++effectSeq.current;
@@ -172,6 +178,70 @@ export default function Materials() {
     }
   };
 
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === materials.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(materials.map(m => m.id)));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`确认删除选中的 ${selectedIds.size} 个资料？此操作不可撤销。`)) return;
+    setBulkDeleting(true);
+    setError('');
+    try {
+      const result = await bulkDeleteMaterials(Array.from(selectedIds));
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      await loadFirstPage();
+      setResults(prev => prev.filter(r => !selectedIds.has(r.material_id)));
+      if (selectedMaterial && selectedIds.has(selectedMaterial.id)) setSelectedMaterial(null);
+      if (result.missing > 0) {
+        setError(`已删除 ${result.deleted} 个，${result.missing} 个未找到。`);
+      }
+    } catch (err) {
+      setError(getApiErrorMessage(err, '批量删除失败，请检查后端服务。'));
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  const handleExportSelected = async () => {
+    if (selectedIds.size === 0) return;
+    setExportingSelected(true);
+    setError('');
+    try {
+      const data = await exportSelectedMaterials(Array.from(selectedIds), true);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `math_agent_materials_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(getApiErrorMessage(err, '导出失败，请检查后端服务。'));
+    } finally {
+      setExportingSelected(false);
+    }
+  };
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
+
   const typeLabel: Record<string, string> = {
     '.pdf': 'PDF',
     '.docx': 'Word',
@@ -184,7 +254,18 @@ export default function Materials() {
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold dark:text-gray-100">资料库</h1>
-        <FileUpload onUpload={handleUpload} onError={setError} maxSizeMb={50} />
+        <div className="flex items-center gap-2">
+          {selectMode ? (
+            <button onClick={exitSelectMode} className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm">
+              取消选择
+            </button>
+          ) : (
+            <button onClick={() => setSelectMode(true)} className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm">
+              批量操作
+            </button>
+          )}
+          <FileUpload onUpload={handleUpload} onError={setError} maxSizeMb={50} />
+        </div>
       </div>
 
       {/* Search */}
@@ -245,7 +326,33 @@ export default function Materials() {
       )}
 
       {/* Material List */}
-      <h2 className="text-lg font-semibold mb-3">已上传资料</h2>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-lg font-semibold">已上传资料</h2>
+        {selectMode && materials.length > 0 && (
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-gray-500 dark:text-gray-400">
+              已选 {selectedIds.size} / {materials.length}
+            </span>
+            <button onClick={toggleSelectAll} className="text-sm text-blue-500 hover:text-blue-700">
+              {selectedIds.size === materials.length ? '取消全选' : '全选'}
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              disabled={selectedIds.size === 0 || bulkDeleting}
+              className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 text-sm"
+            >
+              {bulkDeleting ? '删除中...' : `删除选中 (${selectedIds.size})`}
+            </button>
+            <button
+              onClick={handleExportSelected}
+              disabled={selectedIds.size === 0 || exportingSelected}
+              className="px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm"
+            >
+              {exportingSelected ? '导出中...' : `导出选中 (${selectedIds.size})`}
+            </button>
+          </div>
+        )}
+      </div>
       {loadingMaterials ? (
         <p className="text-gray-400 text-sm">加载中...</p>
       ) : materials.length === 0 ? (
@@ -256,6 +363,14 @@ export default function Materials() {
             {materials.map(m => (
               <div key={m.id} className={`bg-white dark:bg-gray-800 rounded-lg shadow p-4 flex items-center justify-between ${deletingId === m.id ? 'opacity-50' : ''}`}>
                 <div className="flex items-center gap-3">
+                  {selectMode && (
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(m.id)}
+                      onChange={() => toggleSelect(m.id)}
+                      className="w-4 h-4 rounded border-gray-300 dark:border-gray-600"
+                    />
+                  )}
                   <span className="px-2 py-1 bg-gray-100 rounded text-xs font-mono">
                     {typeLabel[m.file_type] || m.file_type}
                   </span>
