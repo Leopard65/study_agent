@@ -1,17 +1,26 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { PreferencesProvider } from './hooks/usePreferences';
 import Sidebar from './components/Sidebar';
 import CommandPalette from './components/CommandPalette';
-import Dashboard from './pages/Dashboard';
-import QA from './pages/QA';
-import Materials from './pages/Materials';
-import ProblemSolver from './pages/ProblemSolver';
-import ErrorBook from './pages/ErrorBook';
-import StudyPlan from './pages/StudyPlan';
-import ExamPractice from './pages/ExamPractice';
-import SearchPage from './pages/SearchPage';
 import { exportJson, getApiErrorMessage } from './api/client';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const QA = lazy(() => import('./pages/QA'));
+const Materials = lazy(() => import('./pages/Materials'));
+const ProblemSolver = lazy(() => import('./pages/ProblemSolver'));
+const ErrorBook = lazy(() => import('./pages/ErrorBook'));
+const StudyPlan = lazy(() => import('./pages/StudyPlan'));
+const ExamPractice = lazy(() => import('./pages/ExamPractice'));
+const SearchPage = lazy(() => import('./pages/SearchPage'));
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center h-64">
+      <div className="text-gray-400 dark:text-gray-500 text-sm">加载中…</div>
+    </div>
+  );
+}
 
 function AppInner() {
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -46,6 +55,7 @@ function AppInner() {
     <div className="flex min-h-screen bg-gray-50 dark:bg-gray-900">
       <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
       <main className="flex-1 overflow-auto">
+        <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/qa" element={<QA />} />
@@ -56,6 +66,7 @@ function AppInner() {
           <Route path="/exam" element={<ExamPractice />} />
           <Route path="/search" element={<SearchPage />} />
         </Routes>
+        </Suspense>
       </main>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onExport={handleExport} />
     </div>
