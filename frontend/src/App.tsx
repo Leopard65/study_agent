@@ -24,6 +24,7 @@ function PageFallback() {
 
 function AppInner() {
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const handleExport = useCallback(async () => {
     try {
@@ -46,14 +47,32 @@ function AppInner() {
         e.preventDefault();
         setPaletteOpen(prev => !prev);
       }
+      if (e.key === 'Escape' && mobileSidebarOpen) {
+        setMobileSidebarOpen(false);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [mobileSidebarOpen]);
 
   return (
     <div className="flex min-h-screen bg-gray-50 dark:bg-gray-900">
-      <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
+      {/* Mobile hamburger */}
+      {!mobileSidebarOpen && (
+        <button
+          onClick={() => setMobileSidebarOpen(true)}
+          className="fixed top-3 left-3 z-30 md:hidden p-2 rounded bg-gray-900 text-gray-100 shadow-lg"
+          aria-label="打开菜单"
+        >
+          ☰
+        </button>
+      )}
+
+      <Sidebar
+        onOpenPalette={() => setPaletteOpen(true)}
+        mobileOpen={mobileSidebarOpen}
+        onMobileClose={() => setMobileSidebarOpen(false)}
+      />
       <main className="flex-1 overflow-auto">
         <Suspense fallback={<PageFallback />}>
         <Routes>

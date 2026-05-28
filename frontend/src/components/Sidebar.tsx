@@ -23,9 +23,11 @@ const THEME_OPTIONS: { value: 'light' | 'dark' | 'system'; label: string; icon: 
 
 interface SidebarProps {
   onOpenPalette: () => void;
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }
 
-export default function Sidebar({ onOpenPalette }: SidebarProps) {
+export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: SidebarProps) {
   const { sidebarCollapsed, theme, setSidebarCollapsed, setTheme } = usePreferences();
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [checking, setChecking] = useState(true);
@@ -116,19 +118,44 @@ export default function Sidebar({ onOpenPalette }: SidebarProps) {
   }
 
   const w = sidebarCollapsed ? 'w-16' : 'w-56';
+  const handleNavClick = () => onMobileClose?.();
 
   return (
-    <aside className={`${w} bg-gray-900 text-gray-100 flex flex-col min-h-screen transition-all duration-200 shrink-0`}>
+    <>
+    {/* Mobile overlay */}
+    {mobileOpen && (
+      <div
+        className="fixed inset-0 z-40 bg-black/50 md:hidden"
+        onClick={onMobileClose}
+      />
+    )}
+
+    <aside className={`
+      ${w} bg-gray-900 text-gray-100 flex flex-col transition-all duration-200
+      md:relative md:min-h-screen md:shrink-0
+      fixed inset-y-0 left-0 z-40 md:z-auto
+      ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+    `}>
       {/* Header */}
       <div className={`py-5 border-b border-gray-700 flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'justify-between px-4'}`}>
         {!sidebarCollapsed && <span className="text-lg font-bold">考研学习助手</span>}
-        <button
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          className="p-1.5 rounded hover:bg-gray-700 text-gray-400 hover:text-gray-200"
-          title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
-        >
-          {sidebarCollapsed ? '▶' : '◀'}
-        </button>
+        <div className="flex items-center gap-1">
+          {/* Mobile close button */}
+          <button
+            onClick={onMobileClose}
+            className="p-1.5 rounded hover:bg-gray-700 text-gray-400 hover:text-gray-200 md:hidden"
+            aria-label="关闭菜单"
+          >
+            ✕
+          </button>
+          <button
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className="p-1.5 rounded hover:bg-gray-700 text-gray-400 hover:text-gray-200 hidden md:block"
+            title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
+          >
+            {sidebarCollapsed ? '▶' : '◀'}
+          </button>
+        </div>
       </div>
 
       {/* Navigation */}
@@ -139,6 +166,7 @@ export default function Sidebar({ onOpenPalette }: SidebarProps) {
             to={l.to}
             end={l.to === '/'}
             title={sidebarCollapsed ? l.label : undefined}
+            onClick={handleNavClick}
             className={({ isActive }) =>
               `flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'gap-3 px-4'} py-2.5 text-sm transition-colors ${
                 isActive ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
@@ -242,5 +270,6 @@ export default function Sidebar({ onOpenPalette }: SidebarProps) {
         )}
       </div>
     </aside>
+    </>
   );
 }
