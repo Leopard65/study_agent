@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { chat, getApiErrorMessage } from '../api/client';
+import type { ChatSource } from '../api/client';
 import ChatMessage from '../components/ChatMessage';
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  sources?: ChatSource[];
 }
 
 export default function QA() {
@@ -25,7 +27,7 @@ export default function QA() {
     setLoading(true);
     try {
       const res = await chat(q);
-      setMessages(prev => [...prev, { role: 'assistant', content: res.answer }]);
+      setMessages(prev => [...prev, { role: 'assistant', content: res.answer, sources: res.sources }]);
     } catch (err) {
       const msg = getApiErrorMessage(err, '请求失败，请检查后端服务是否运行。');
       setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
@@ -36,8 +38,8 @@ export default function QA() {
 
   return (
     <div className="flex flex-col h-screen">
-      <div className="px-6 py-4 border-b bg-white">
-        <h1 className="text-xl font-bold">AI 问答</h1>
+      <div className="px-6 py-4 border-b bg-white dark:bg-gray-800 dark:border-gray-700">
+        <h1 className="text-xl font-bold dark:text-gray-100">AI 问答</h1>
         <p className="text-sm text-gray-400">支持数学公式 LaTeX 渲染</p>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -48,21 +50,21 @@ export default function QA() {
           </div>
         )}
         {messages.map((m, i) => (
-          <ChatMessage key={i} role={m.role} content={m.content} />
+          <ChatMessage key={i} role={m.role} content={m.content} sources={m.sources} />
         ))}
         {loading && (
           <div className="flex justify-start mb-4">
-            <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3 text-sm text-gray-400">
+            <div className="bg-gray-100 dark:bg-gray-700 rounded-2xl rounded-bl-md px-4 py-3 text-sm text-gray-400">
               思考中...
             </div>
           </div>
         )}
         <div ref={bottomRef} />
       </div>
-      <div className="px-6 py-4 border-t bg-white">
+      <div className="px-6 py-4 border-t bg-white dark:bg-gray-800 dark:border-gray-700">
         <div className="flex gap-3">
           <input
-            className="flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            className="flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
             placeholder="输入问题，例如：求极限 lim(x→0) sin(x)/x"
             value={input}
             onChange={e => setInput(e.target.value)}

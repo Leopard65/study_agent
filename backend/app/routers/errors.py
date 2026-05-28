@@ -1,10 +1,12 @@
-from datetime import date, timedelta
+from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import ErrorBook
 from app.schemas import ErrorBookCreate, ErrorBookUpdate, ErrorBookItem
+from app.utils.date import local_today, local_date_obj
+from app.routers.settings import get_review_intervals
 
 router = APIRouter(prefix="/api/errors", tags=["errors"])
 
@@ -34,9 +36,6 @@ async def list_errors(
     return result.scalars().all()
 
 
-REVIEW_INTERVALS = {1: 1, 2: 3, 3: 7}  # review_count -> days
-
-
 @router.patch("/{error_id}", response_model=ErrorBookItem)
 async def update_error(error_id: int, req: ErrorBookUpdate, db: AsyncSession = Depends(get_db)):
     record = await db.get(ErrorBook, error_id)
@@ -47,13 +46,15 @@ async def update_error(error_id: int, req: ErrorBookUpdate, db: AsyncSession = D
         old_mastered = record.mastered
         new_mastered = req.mastered
         if not old_mastered and new_mastered:
+            intervals = await get_review_intervals(db)
             record.review_count = (record.review_count or 0) + 1
-            interval = REVIEW_INTERVALS.get(record.review_count, 14)
-            record.next_review_date = (date.today() + timedelta(days=interval)).isoformat()
+            idx = min(record.review_count - 1, len(intervals) - 1)
+            interval = intervals[idx]
+            record.next_review_date = (local_date_obj() + timedelta(days=interval)).isoformat()
             record.mastered = True
         elif old_mastered and not new_mastered:
             record.mastered = False
-            record.next_review_date = date.today().isoformat()
+            record.next_review_date = local_today()
 
     if req.next_review_date is not None:
         record.next_review_date = req.next_review_date

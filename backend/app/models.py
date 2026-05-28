@@ -72,3 +72,47 @@ class ProblemRecord(Base):
     solution = Column(Text, default="")
     subject = Column(String(100), default="")
     created_at = Column(DateTime, server_default=func.now())
+
+
+class ExamQuestion(Base):
+    __tablename__ = "exam_questions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(500), nullable=False)
+    subject = Column(String(100), default="")
+    year = Column(String(10), default="")
+    question = Column(Text, nullable=False)
+    answer = Column(Text, default="")
+    solution = Column(Text, default="")
+    tags = Column(String(500), default="")
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class ExamAttempt(Base):
+    __tablename__ = "exam_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    question_id = Column(Integer, nullable=False, index=True)
+    user_answer = Column(Text, default="")
+    is_correct = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(Text, nullable=False, default="")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StudySession(Base):
+    __tablename__ = "study_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    subject = Column(String(100), default="")
+    note = Column(Text, default="")
+    started_at = Column(DateTime, nullable=False)
+    ended_at = Column(DateTime, nullable=True)
+    duration_minutes = Column(Integer, default=0)
+    created_at = Column(DateTime, server_default=func.now())

@@ -85,6 +85,48 @@ async def solve_problem(question: str, subject: str = "") -> str:
     return response.choices[0].message.content or ""
 
 
+async def generate_exam_questions(
+    subject: str, topic: str, count: int, difficulty: str = "", context: str = ""
+) -> str:
+    model = _require_api_key()
+    diff_hint = f"难度：{difficulty}\n" if difficulty else ""
+    ctx_hint = f"参考资料：\n{context}\n\n" if context else ""
+    prompt = (
+        f"{ctx_hint}"
+        f"请为考研复习生成 {count} 道练习题。\n"
+        f"科目：{subject or '不限'}\n"
+        f"知识点/主题：{topic}\n"
+        f"{diff_hint}"
+        f"请严格以 JSON 数组格式返回，每个元素包含以下字段：\n"
+        f'  - title: 题目标题（简短概括）\n'
+        f'  - subject: 所属科目\n'
+        f'  - year: 出题年份（可用"模拟"或留空）\n'
+        f'  - question: 题目正文（数学公式用 LaTeX 格式：行内 $...$，独立 $$...$$）\n'
+        f'  - answer: 参考答案\n'
+        f'  - solution: 详细解析过程\n'
+        f'  - tags: 标签（逗号分隔）\n'
+        f"只返回 JSON，不要包含任何其他文字、解释或 markdown 代码块标记。\n"
+        f"示例：\n"
+        f'[{{"title":"极限计算","subject":"高等数学","year":"模拟","question":"求极限 $\\\\lim_{{x\\\\to 0}} \\\\frac{{\\\\sin x}}{{x}}$","answer":"1","solution":"由等价无穷小 $\\\\sin x \\\\sim x$，极限为 1。","tags":"极限,等价无穷小"}}]'
+    )
+    messages = [
+        {"role": "system", "content": "你是考研出题专家，请生成高质量的练习题。只输出 JSON 数组。"},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        response = await get_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.6,
+            max_tokens=8192,
+        )
+    except LLMConfigError:
+        raise
+    except Exception as e:
+        raise LLMCallError(f"AI 接口调用失败：{e}") from e
+    return response.choices[0].message.content or ""
+
+
 async def generate_plan(subjects: list[str], daily_hours: int, days: int, start_date: str = "") -> str:
     model = _require_api_key()
     subject_str = "、".join(subjects)

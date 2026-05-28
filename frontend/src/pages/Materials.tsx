@@ -1,7 +1,31 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, getApiErrorMessage } from '../api/client';
 import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
+
+function HighlightedSnippet({ text }: { text: string }): ReactNode {
+  const parts: ReactNode[] = [];
+  let remaining = text;
+  let key = 0;
+  while (remaining.length > 0) {
+    const start = remaining.indexOf('>>>');
+    if (start === -1) {
+      parts.push(remaining);
+      break;
+    }
+    if (start > 0) parts.push(remaining.slice(0, start));
+    const afterOpen = remaining.slice(start + 3);
+    const end = afterOpen.indexOf('<<<');
+    if (end === -1) {
+      parts.push(remaining.slice(start));
+      break;
+    }
+    parts.push(<mark key={key++}>{afterOpen.slice(0, end)}</mark>);
+    remaining = afterOpen.slice(end + 3);
+  }
+  return <>{parts}</>;
+}
 
 const PAGE_SIZE = 20;
 
@@ -10,6 +34,7 @@ function fetchFirstMaterials(): Promise<MaterialItem[]> {
 }
 
 export default function Materials() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<MaterialSearchResult[]>([]);
@@ -117,6 +142,20 @@ export default function Materials() {
     }
   };
 
+  // Deep link: auto-open material detail
+  useEffect(() => {
+    const openId = searchParams.get('open');
+    if (openId) {
+      const id = parseInt(openId, 10);
+      if (!isNaN(id)) {
+        setTimeout(() => {
+          handleViewDetail(id).catch(() => {});
+          setSearchParams({}, { replace: true });
+        }, 0);
+      }
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleDelete = async (id: number) => {
     if (deletingId === id) return;
     setError('');
@@ -144,14 +183,14 @@ export default function Materials() {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">资料库</h1>
+        <h1 className="text-2xl font-bold dark:text-gray-100">资料库</h1>
         <FileUpload onUpload={handleUpload} onError={setError} maxSizeMb={50} />
       </div>
 
       {/* Search */}
       <div className="flex gap-3 mb-6">
         <input
-          className="flex-1 border rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          className="flex-1 border rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
           placeholder="关键词检索资料内容..."
           value={query}
           onChange={e => setQuery(e.target.value)}
@@ -175,13 +214,13 @@ export default function Materials() {
       </div>
 
       {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+        <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">
           {error}
         </div>
       )}
 
       {detailError && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+        <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">
           {detailError}
         </div>
       )}
@@ -197,7 +236,7 @@ export default function Materials() {
               {results.map(r => (
                 <div key={r.material_id} className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm">
                   <div className="font-medium text-gray-700">{r.filename}</div>
-                  <div className="text-gray-500 mt-1" dangerouslySetInnerHTML={{ __html: r.snippet.replace(/>>>/g, '<mark>').replace(/<<</g, '</mark>') }} />
+                  <div className="text-gray-500 mt-1"><HighlightedSnippet text={r.snippet} /></div>
                 </div>
               ))}
             </div>
@@ -215,12 +254,12 @@ export default function Materials() {
         <>
           <div className="grid gap-3">
             {materials.map(m => (
-              <div key={m.id} className={`bg-white rounded-lg shadow p-4 flex items-center justify-between ${deletingId === m.id ? 'opacity-50' : ''}`}>
+              <div key={m.id} className={`bg-white dark:bg-gray-800 rounded-lg shadow p-4 flex items-center justify-between ${deletingId === m.id ? 'opacity-50' : ''}`}>
                 <div className="flex items-center gap-3">
                   <span className="px-2 py-1 bg-gray-100 rounded text-xs font-mono">
                     {typeLabel[m.file_type] || m.file_type}
                   </span>
-                  <span className="text-sm text-gray-700">{m.filename}</span>
+                  <span className="text-sm text-gray-700 dark:text-gray-300">{m.filename}</span>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-gray-400">
@@ -255,19 +294,19 @@ export default function Materials() {
       {/* Detail Modal */}
       {selectedMaterial && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedMaterial(null)}>
-          <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b">
-              <h3 className="text-lg font-semibold text-gray-800 truncate">{selectedMaterial.filename}</h3>
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 truncate">{selectedMaterial.filename}</h3>
               <button onClick={() => setSelectedMaterial(null)} className="text-gray-400 hover:text-gray-600 text-xl ml-4">&times;</button>
             </div>
             <div className="px-6 py-4 overflow-y-auto flex-1">
-              <div className="flex flex-wrap gap-4 text-sm text-gray-600 mb-4">
+              <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400 mb-4">
                 <span>文件类型：{typeLabel[selectedMaterial.file_type] || selectedMaterial.file_type}</span>
                 <span>上传时间：{selectedMaterial.created_at ? new Date(selectedMaterial.created_at).toLocaleString() : '未知'}</span>
                 {selectedMaterial.stored_filename && <span>存储文件名：{selectedMaterial.stored_filename}</span>}
                 <span>文本长度：{selectedMaterial.content_length} 字符</span>
               </div>
-              <div className="text-sm text-gray-700">
+              <div className="text-sm text-gray-700 dark:text-gray-300">
                 {selectedMaterial.preview ? (
                   <>
                     <pre className="whitespace-pre-wrap bg-gray-50 rounded p-4 max-h-96 overflow-y-auto text-sm leading-relaxed">

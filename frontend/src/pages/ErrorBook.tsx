@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { listErrors, createError, updateError, deleteError, getApiErrorMessage } from '../api/client';
+import { listErrors, createError, updateError, deleteError, getReviewSettings, updateReviewSettings, getApiErrorMessage } from '../api/client';
 import type { ErrorBookItem } from '../api/client';
 import LatexRenderer from '../components/LatexRenderer';
 import { formatLocalDate } from '../utils/date';
@@ -43,8 +43,16 @@ export default function ErrorBook() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [adding, setAdding] = useState(false);
+
+  // Review settings
+  const [showSettings, setShowSettings] = useState(false);
+  const [intervalsStr, setIntervalsStr] = useState('1,3,7,14');
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsMsg, setSettingsMsg] = useState('');
+  const [settingsError, setSettingsError] = useState('');
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [highlightId, setHighlightId] = useState<number | null>(null);
   const effectSeq = useRef(0);
 
   useEffect(() => {
@@ -60,6 +68,22 @@ export default function ErrorBook() {
     return () => { effectSeq.current += 1; };
   }, [filter]);
 
+  // Deep link: auto-expand and highlight
+  useEffect(() => {
+    const openId = searchParams.get('open');
+    if (openId) {
+      const id = parseInt(openId, 10);
+      if (!isNaN(id)) {
+        setTimeout(() => {
+          setExpandedId(id);
+          setHighlightId(id);
+          setSearchParams({}, { replace: true });
+          setTimeout(() => setHighlightId(null), 3000);
+        }, 0);
+      }
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const loadErrors = useCallback(async () => {
     try {
       const items = await fetchErrorsByFilter(filter);
@@ -69,6 +93,35 @@ export default function ErrorBook() {
       setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
     }
   }, [filter]);
+
+  const loadSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsError('');
+    try {
+      const data = await getReviewSettings();
+      setIntervalsStr(data.intervals.join(','));
+    } catch (err) {
+      setSettingsError(getApiErrorMessage(err, '加载复习策略失败。'));
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
+  const handleSaveSettings = async () => {
+    setSettingsMsg('');
+    setSettingsError('');
+    const nums = intervalsStr.split(',').map(s => parseInt(s.trim(), 10));
+    if (nums.some(isNaN)) {
+      setSettingsError('请输入有效的数字，用逗号分隔');
+      return;
+    }
+    try {
+      await updateReviewSettings(nums);
+      setSettingsMsg('复习策略已保存');
+    } catch (err) {
+      setSettingsError(getApiErrorMessage(err, '保存复习策略失败。'));
+    }
+  };
 
   const handleAdd = async () => {
     if (!form.question.trim()) return;
@@ -119,7 +172,7 @@ export default function ErrorBook() {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">错题本</h1>
+        <h1 className="text-2xl font-bold dark:text-gray-100">错题本</h1>
         <button
           onClick={() => setShowAdd(!showAdd)}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
@@ -134,7 +187,7 @@ export default function ErrorBook() {
             key={f}
             onClick={() => { setError(''); if (f === 'all') { setSearchParams({}); } else { setSearchParams({ filter: f }); } }}
             className={`px-3 py-1.5 rounded-lg text-sm ${
-              filter === f ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              filter === f ? 'bg-blue-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
             }`}
           >
             {{ all: '全部', unmastered: '未掌握', mastered: '已掌握', review: '今日复习' }[f]}
@@ -143,32 +196,66 @@ export default function ErrorBook() {
       </div>
 
       {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+        <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">
           {error}
         </div>
       )}
 
+      {/* Review settings */}
+      <div className="mb-4">
+        <button
+          onClick={() => {
+            if (!showSettings) loadSettings();
+            setShowSettings(!showSettings);
+          }}
+          className="text-xs text-gray-400 hover:text-gray-600"
+        >
+          {showSettings ? '收起复习策略设置' : '复习策略设置'} ▸
+        </button>
+        {showSettings && (
+          <div className="mt-2 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg flex items-center gap-3 flex-wrap">
+            <span className="text-xs text-gray-500 dark:text-gray-400">掌握后复习间隔（天）：</span>
+            <input
+              className="border rounded px-2 py-1 text-sm w-48 dark:bg-gray-600 dark:border-gray-500 dark:text-gray-100"
+              placeholder="1,3,7,14"
+              value={intervalsStr}
+              onChange={e => setIntervalsStr(e.target.value)}
+              disabled={settingsLoading}
+            />
+            <button
+              onClick={handleSaveSettings}
+              disabled={settingsLoading}
+              className="px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
+            >
+              保存
+            </button>
+            {settingsMsg && <span className="text-xs text-green-600">{settingsMsg}</span>}
+            {settingsError && <span className="text-xs text-red-500">{settingsError}</span>}
+          </div>
+        )}
+      </div>
+
       {showAdd && (
-        <div className="bg-white rounded-xl shadow p-5 mb-6">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 mb-6">
           <div className="grid grid-cols-3 gap-3 mb-3">
-            <input className="border rounded-lg px-3 py-2 text-sm" placeholder="科目" value={form.subject} onChange={e => set('subject', e.target.value)} />
-            <input className="border rounded-lg px-3 py-2 text-sm" placeholder="章节" value={form.chapter} onChange={e => set('chapter', e.target.value)} />
-            <input className="border rounded-lg px-3 py-2 text-sm" placeholder="知识点" value={form.knowledge_point} onChange={e => set('knowledge_point', e.target.value)} />
+            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="科目" value={form.subject} onChange={e => set('subject', e.target.value)} />
+            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="章节" value={form.chapter} onChange={e => set('chapter', e.target.value)} />
+            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="知识点" value={form.knowledge_point} onChange={e => set('knowledge_point', e.target.value)} />
           </div>
-          <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none mb-3" placeholder="题目内容" value={form.question} onChange={e => set('question', e.target.value)} />
+          <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none mb-3 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="题目内容" value={form.question} onChange={e => set('question', e.target.value)} />
           <div className="grid grid-cols-2 gap-3 mb-3">
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none" placeholder="你的错误答案" value={form.user_answer} onChange={e => set('user_answer', e.target.value)} />
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none" placeholder="正确答案/解析" value={form.correct_answer} onChange={e => set('correct_answer', e.target.value)} />
+            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="你的错误答案" value={form.user_answer} onChange={e => set('user_answer', e.target.value)} />
+            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="正确答案/解析" value={form.correct_answer} onChange={e => set('correct_answer', e.target.value)} />
           </div>
           <div className="grid grid-cols-3 gap-3 mb-3">
-            <input className="border rounded-lg px-3 py-2 text-sm" placeholder="错误类型（如计算错误）" value={form.error_type} onChange={e => set('error_type', e.target.value)} />
-            <input className="border rounded-lg px-3 py-2 text-sm" placeholder="标签（逗号分隔）" value={form.tags} onChange={e => set('tags', e.target.value)} />
-            <input type="date" className="border rounded-lg px-3 py-2 text-sm" title="下次复习时间" value={form.next_review_date} onChange={e => set('next_review_date', e.target.value)} />
+            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="错误类型（如计算错误）" value={form.error_type} onChange={e => set('error_type', e.target.value)} />
+            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="标签（逗号分隔）" value={form.tags} onChange={e => set('tags', e.target.value)} />
+            <input type="date" className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" title="下次复习时间" value={form.next_review_date} onChange={e => set('next_review_date', e.target.value)} />
           </div>
-          <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none mb-3" placeholder="错误原因" value={form.error_reason} onChange={e => set('error_reason', e.target.value)} />
+          <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none mb-3 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="错误原因" value={form.error_reason} onChange={e => set('error_reason', e.target.value)} />
           <div className="grid grid-cols-2 gap-3 mb-3">
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none" placeholder="正确思路" value={form.correct_approach} onChange={e => set('correct_approach', e.target.value)} />
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none" placeholder="复习建议" value={form.review_suggestion} onChange={e => set('review_suggestion', e.target.value)} />
+            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="正确思路" value={form.correct_approach} onChange={e => set('correct_approach', e.target.value)} />
+            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="复习建议" value={form.review_suggestion} onChange={e => set('review_suggestion', e.target.value)} />
           </div>
           <button onClick={handleAdd} disabled={adding} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm">{adding ? '保存中...' : '保存'}</button>
         </div>
@@ -183,7 +270,7 @@ export default function ErrorBook() {
           {errors.map(item => {
             const rowBusy = updatingId === item.id || deletingId === item.id;
             return (
-            <div key={item.id} className={`bg-white rounded-xl shadow p-5 ${rowBusy ? 'opacity-50' : ''} ${item.mastered && !rowBusy ? 'opacity-60' : ''}`}>
+            <div key={item.id} className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${rowBusy ? 'opacity-50' : ''} ${item.mastered && !rowBusy ? 'opacity-60' : ''} ${highlightId === item.id ? 'ring-2 ring-blue-400' : ''}`}>
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2 flex-wrap">
                   {item.subject && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{item.subject}</span>}
@@ -191,7 +278,7 @@ export default function ErrorBook() {
                   {item.knowledge_point && <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded text-xs">{item.knowledge_point}</span>}
                   {item.error_type && <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs">{item.error_type}</span>}
                   {item.tags && item.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
-                    <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{tag}</span>
+                    <span key={tag} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-600 text-gray-500 dark:text-gray-300 rounded text-xs">{tag}</span>
                   ))}
                   <span className="px-2 py-0.5 bg-teal-100 text-teal-700 rounded text-xs">复习 {item.review_count} 次</span>
                 </div>
@@ -213,8 +300,8 @@ export default function ErrorBook() {
 
               {expandedId === item.id && (
                 <div className="mt-3 pt-3 border-t space-y-2 text-sm">
-                  {item.user_answer && <div><span className="font-medium text-red-600">错误答案：</span><div className="prose prose-sm max-w-none"><LatexRenderer content={item.user_answer} /></div></div>}
-                  {item.correct_answer && <div><span className="font-medium text-green-600">正确答案：</span><div className="prose prose-sm max-w-none"><LatexRenderer content={item.correct_answer} /></div></div>}
+                  {item.user_answer && <div><span className="font-medium text-red-600">错误答案：</span><div className="prose prose-sm max-w-none dark:text-gray-100"><LatexRenderer content={item.user_answer} /></div></div>}
+                  {item.correct_answer && <div><span className="font-medium text-green-600">正确答案：</span><div className="prose prose-sm max-w-none dark:text-gray-100"><LatexRenderer content={item.correct_answer} /></div></div>}
                   {item.error_reason && <div><span className="font-medium text-gray-600">错误原因：</span>{item.error_reason}</div>}
                   {item.correct_approach && <div><span className="font-medium text-blue-600">正确思路：</span>{item.correct_approach}</div>}
                   {item.review_suggestion && <div><span className="font-medium text-purple-600">复习建议：</span>{item.review_suggestion}</div>}

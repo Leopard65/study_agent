@@ -1,5 +1,8 @@
 """本地冒烟测试：覆盖非 AI 主链路，不依赖 API Key。
-用法：cd backend && .venv\\Scripts\\python.exe scripts\\smoke_test.py"""
+用法：cd backend && .venv\\Scripts\\python.exe scripts\\smoke_test.py
+
+环境变量 CORS_ORIGINS 可配置 CORS 允许来源，默认 localhost:5173。"""
+import json
 import os
 import sys
 
@@ -17,6 +20,7 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_db_path}"
 os.environ["UPLOAD_DIR"] = _uploads_dir
 os.environ["MAX_UPLOAD_MB"] = "1"
 os.environ["MATERIAL_PREVIEW_CHARS"] = "5000"
+os.environ["APP_TIMEZONE"] = "Asia/Shanghai"
 
 import asyncio
 
@@ -350,13 +354,14 @@ def run(client: TestClient):
     check("error review_count=0", err_body.get("review_count") == 0)
 
     print("\n[10] PATCH /api/errors/{id} (mastered=true, 1st review)")
-    from datetime import date as _date, timedelta as _td
+    from datetime import timedelta as _td
+    from app.utils.date import local_date_obj
     r = client.patch(f"/api/errors/{error_id}", json={"mastered": True})
     check("patch error 200", r.status_code == 200)
     err1 = r.json()
     check("error mastered=true", err1["mastered"] is True)
     check("review_count=1", err1.get("review_count") == 1)
-    expected_date1 = (_date.today() + _td(days=1)).isoformat()
+    expected_date1 = (local_date_obj() + _td(days=1)).isoformat()
     check("next_review_date=tomorrow", err1.get("next_review_date") == expected_date1, f"got {err1.get('next_review_date')}")
 
     print("\n[10b] PATCH /api/errors/{id} (mastered=false)")
@@ -365,7 +370,7 @@ def run(client: TestClient):
     err2 = r.json()
     check("mastered=false", err2["mastered"] is False)
     check("review_count still 1", err2.get("review_count") == 1)
-    expected_today = _date.today().isoformat()
+    expected_today = local_date_obj().isoformat()
     check("next_review_date=today", err2.get("next_review_date") == expected_today, f"got {err2.get('next_review_date')}")
 
     print("\n[10c] PATCH /api/errors/{id} (mastered=true, 2nd review)")
@@ -373,7 +378,7 @@ def run(client: TestClient):
     check("re-master 200", r.status_code == 200)
     err3 = r.json()
     check("review_count=2", err3.get("review_count") == 2)
-    expected_date2 = (_date.today() + _td(days=3)).isoformat()
+    expected_date2 = (local_date_obj() + _td(days=3)).isoformat()
     check("next_review_date=+3d", err3.get("next_review_date") == expected_date2, f"got {err3.get('next_review_date')}")
 
     # ── 10d. Repeat mastered=true should NOT double-increment ──
@@ -414,7 +419,7 @@ def run(client: TestClient):
     check("re-master at count 5 200", r.status_code == 200)
     err3h = r.json()
     check("review_count=5", err3h.get("review_count") == 5, f"got {err3h.get('review_count')}")
-    expected_date5 = (_date.today() + _td(days=14)).isoformat()
+    expected_date5 = (local_date_obj() + _td(days=14)).isoformat()
     check("next_review_date=+14d", err3h.get("next_review_date") == expected_date5, f"got {err3h.get('next_review_date')}")
 
     print("\n[11] GET /api/errors?mastered=true")
@@ -433,8 +438,849 @@ def run(client: TestClient):
     r = client.get("/api/dashboard")
     check("dashboard 200", r.status_code == 200)
     dash = r.json()
-    for field in ("today_tasks", "today_completed", "total_materials", "total_errors", "unmastered_errors", "streak_days"):
+    for field in ("today_tasks", "today_completed", "total_materials", "total_errors", "unmastered_errors", "streak_days", "today_review_errors"):
         check(f"has {field}", field in dash)
+    check("today_review_errors is int", isinstance(dash["today_review_errors"], int))
+
+    # ── 7b. Dashboard today_review_errors with due error ──
+    print("\n[13b] Dashboard today_review_errors")
+    from app.utils.date import local_today
+    today_str = local_today()
+    r = client.post("/api/errors", json={
+        "subject": "复习统计",
+        "question": "待复习错题",
+        "next_review_date": today_str,
+    })
+    check("review error create 200", r.status_code == 200)
+    review_err_id = r.json()["id"]
+
+    r = client.get("/api/dashboard")
+    check("dashboard with review err 200", r.status_code == 200)
+    dash2 = r.json()
+    check("today_review_errors >= 1", dash2["today_review_errors"] >= 1, f"got {dash2['today_review_errors']}")
+
+    # ── 7c. Future-dated error should NOT count as today review ──
+    print("\n[13c] Future-dated error not counted")
+    from datetime import timedelta as _td2
+    from app.utils.date import local_date_obj
+    future_str = (local_date_obj() + _td2(days=30)).isoformat()
+    r = client.post("/api/errors", json={
+        "subject": "未来复习",
+        "question": "未来错题",
+        "next_review_date": future_str,
+    })
+    check("future error create 200", r.status_code == 200)
+    future_err_id = r.json()["id"]
+
+    r = client.get("/api/dashboard")
+    check("dashboard after future err 200", r.status_code == 200)
+    dash3 = r.json()
+    # today_review_errors should still be exactly 1 (the today-dated one, not the future one)
+    check("today_review_errors still 1", dash3["today_review_errors"] == 1, f"got {dash3['today_review_errors']}")
+
+    # cleanup both errors
+    r = client.delete(f"/api/errors/{review_err_id}")
+    check("cleanup review error 200", r.status_code == 200)
+    r = client.delete(f"/api/errors/{future_err_id}")
+    check("cleanup future error 200", r.status_code == 200)
+
+    # ── 7d. After cleanup, today_review_errors should be 0 ──
+    print("\n[13d] Dashboard after cleanup")
+    r = client.get("/api/dashboard")
+    check("dashboard after cleanup 200", r.status_code == 200)
+    dash4 = r.json()
+    check("today_review_errors back to 0", dash4["today_review_errors"] == 0, f"got {dash4['today_review_errors']}")
+
+    # ── 8. Input validation ──
+    print("\n[14] Input validation")
+    r = client.post("/api/errors", json={"question": ""})
+    check("empty question rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/errors", json={"question": "ok", "next_review_date": "bad-date"})
+    check("bad date format rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/plan", json={"date": "2025/01/01", "subject": "x", "task": "y"})
+    check("plan bad date rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/materials/search", json={"query": "", "limit": 5})
+    check("empty search query rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/problems/solve", json={"question": ""})
+    check("empty problem question rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/plan/generate", json={"subjects": [], "days": 7})
+    check("empty subjects rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/plan/generate", json={"subjects": ["math"], "days": 0})
+    check("days=0 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/plan/generate", json={"subjects": ["math"], "daily_hours": 0})
+    check("daily_hours=0 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # chat empty question
+    r = client.post("/api/chat", json={"question": ""})
+    check("chat empty question rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # plan generate bad start_date
+    r = client.post("/api/plan/generate", json={"subjects": ["math"], "start_date": "not-a-date"})
+    check("plan gen bad start_date 422", r.status_code == 422, f"got {r.status_code}")
+
+    # boundary values that should pass
+    r = client.post("/api/plan/generate", json={"subjects": ["math"], "days": 365, "daily_hours": 16})
+    check("plan gen boundary values pass", r.status_code in (200, 502, 503), f"got {r.status_code}")
+
+    # subjects with empty strings after strip should fail
+    r = client.post("/api/plan/generate", json={"subjects": ["", "  "], "days": 7})
+    check("whitespace-only subjects rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # ── 9. Search snippet markers ──
+    print("\n[15] Search snippet markers")
+    # Upload a fresh material for snippet testing
+    snippet_file = os.path.join(_tmp_dir, "snippet_test.txt")
+    with open(snippet_file, "w", encoding="utf-8") as f:
+        f.write("搜索高亮安全测试片段包含关键内容。")
+    with open(snippet_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("snippet_test.txt", f, "text/plain")})
+    check("snippet material upload 200", r.status_code == 200)
+    snippet_mid = r.json()["id"]
+
+    r = client.post("/api/materials/search", json={"query": "搜索高亮", "limit": 1})
+    check("snippet search 200", r.status_code == 200)
+    snippet_results = r.json()
+    if len(snippet_results) > 0:
+        snippet = snippet_results[0].get("snippet", "")
+        check("snippet has no <script>", "<script>" not in snippet)
+        check("snippet has no <img>", "<img" not in snippet)
+        check("snippet has no raw HTML tags", "<" not in snippet or ">>>" in snippet)
+    else:
+        print("  SKIP  snippet content check — no results")
+
+    # cleanup
+    r = client.delete(f"/api/materials/{snippet_mid}")
+    check("snippet material cleanup 200", r.status_code == 200)
+
+    # ── 16. Exam Practice CRUD ──
+    print("\n[16] POST /api/exam/questions")
+    r = client.post("/api/exam/questions", json={
+        "title": "2025年高数真题-极限",
+        "subject": "高等数学",
+        "year": "2025",
+        "question": "求极限 $\\lim_{x\\to 0} \\frac{\\sin x}{x}$",
+        "answer": "1",
+        "solution": "由洛必达法则或等价无穷小可知极限为1。",
+        "tags": "极限,洛必达",
+    })
+    check("create exam question 200", r.status_code == 200, f"got {r.status_code}")
+    eq_body = r.json()
+    eq_id = eq_body["id"]
+    check("exam question has id", eq_id is not None)
+    check("exam question title matches", eq_body["title"] == "2025年高数真题-极限")
+    check("exam question subject matches", eq_body["subject"] == "高等数学")
+    check("exam question year matches", eq_body["year"] == "2025")
+
+    print("\n[16b] GET /api/exam/questions")
+    r = client.get("/api/exam/questions")
+    check("list exam questions 200", r.status_code == 200)
+    eq_list = r.json()
+    check("found our exam question", any(q["id"] == eq_id for q in eq_list))
+
+    print("\n[16c] GET /api/exam/questions?subject=高等数学")
+    r = client.get("/api/exam/questions", params={"subject": "高等数学"})
+    check("filter by subject 200", r.status_code == 200)
+    filtered = r.json()
+    check("filtered has our question", any(q["id"] == eq_id for q in filtered))
+
+    print("\n[16d] GET /api/exam/questions?year=2025")
+    r = client.get("/api/exam/questions", params={"year": "2025"})
+    check("filter by year 200", r.status_code == 200)
+    year_filtered = r.json()
+    check("year filtered has our question", any(q["id"] == eq_id for q in year_filtered))
+
+    print("\n[16e] GET /api/exam/questions?tag=极限")
+    r = client.get("/api/exam/questions", params={"tag": "极限"})
+    check("filter by tag 200", r.status_code == 200)
+    tag_filtered = r.json()
+    check("tag filtered has our question", any(q["id"] == eq_id for q in tag_filtered))
+
+    print("\n[16f] GET /api/exam/questions/{id}")
+    r = client.get(f"/api/exam/questions/{eq_id}")
+    check("get exam question 200", r.status_code == 200)
+    eq_detail = r.json()
+    check("detail id matches", eq_detail["id"] == eq_id)
+    check("detail question has LaTeX", "\\sin" in eq_detail["question"])
+
+    # ── 16g. Submit attempt ──
+    print("\n[16g] POST /api/exam/questions/{id}/attempt")
+    r = client.post(f"/api/exam/questions/{eq_id}/attempt", json={"user_answer": "1"})
+    check("submit attempt 200", r.status_code == 200)
+    attempt_body = r.json()
+    attempt_id = attempt_body["id"]
+    check("attempt has id", attempt_id is not None)
+    check("attempt question_id matches", attempt_body["question_id"] == eq_id)
+    check("attempt user_answer matches", attempt_body["user_answer"] == "1")
+
+    # ── 16h. Add to error book ──
+    print("\n[16h] POST /api/exam/questions/{id}/add-to-errors")
+    r = client.post(f"/api/exam/questions/{eq_id}/add-to-errors")
+    check("add to errors 200", r.status_code == 200)
+    added_err = r.json()
+    check("error has id", added_err["id"] is not None)
+    check("error subject from exam", added_err["subject"] == "高等数学")
+    check("error question from exam", "sin" in added_err["question"] or "极限" in added_err["question"])
+    check("error correct_answer from exam", added_err["correct_answer"] == "1")
+    check("error error_type=真题练习", added_err["error_type"] == "真题练习")
+    added_err_id = added_err["id"]
+
+    # ── 16h2. Duplicate add-to-errors should return 409 ──
+    r = client.post(f"/api/exam/questions/{eq_id}/add-to-errors")
+    check("duplicate add-to-errors 409", r.status_code == 409, f"got {r.status_code}")
+    check("duplicate detail contains 已在错题本中", "已在错题本中" in r.json().get("detail", ""), f"detail={r.json().get('detail')}")
+
+    # cleanup the error created from exam
+    r = client.delete(f"/api/errors/{added_err_id}")
+    check("cleanup exam error 200", r.status_code == 200)
+
+    # ── 16i. Delete exam question (cascade attempts) ──
+    print("\n[16i] DELETE /api/exam/questions/{id}")
+    r = client.delete(f"/api/exam/questions/{eq_id}")
+    check("delete exam question 200", r.status_code == 200)
+    check("ok=true", r.json().get("ok") is True)
+
+    # verify cascade: attempt should be gone
+    async def verify_exam_cleanup():
+        async with async_session() as session:
+            q_count = (await session.execute(
+                text("SELECT COUNT(*) FROM exam_questions WHERE id = :id"), {"id": eq_id}
+            )).scalar() or 0
+            a_count = (await session.execute(
+                text("SELECT COUNT(*) FROM exam_attempts WHERE question_id = :id"), {"id": eq_id}
+            )).scalar() or 0
+            return q_count, a_count
+
+    loop5 = asyncio.new_event_loop()
+    q_count, a_count = loop5.run_until_complete(verify_exam_cleanup())
+    loop5.close()
+    check("exam question deleted from DB", q_count == 0, f"count={q_count}")
+    check("exam attempts cascade deleted", a_count == 0, f"count={a_count}")
+
+    # verify 404 after deletion
+    r = client.get(f"/api/exam/questions/{eq_id}")
+    check("exam question 404 after delete", r.status_code == 404, f"got {r.status_code}")
+
+    # ── 16j. Exam input validation ──
+    print("\n[16j] Exam input validation")
+    r = client.post("/api/exam/questions", json={"title": "", "question": "test"})
+    check("empty title rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/questions", json={"title": "ok", "question": ""})
+    check("empty question rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/questions", json={"title": "ok", "question": "ok", "year": "bad"})
+    check("bad year format rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/questions", json={"title": "ok", "question": "ok", "year": "202"})
+    check("3-digit year rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.get("/api/exam/questions/99999")
+    check("nonexistent exam question 404", r.status_code == 404, f"got {r.status_code}")
+
+    r = client.post("/api/exam/questions/99999/attempt", json={"user_answer": "x"})
+    check("attempt on nonexistent 404", r.status_code == 404, f"got {r.status_code}")
+
+    r = client.post("/api/exam/questions/99999/add-to-errors")
+    check("add-to-errors on nonexistent 404", r.status_code == 404, f"got {r.status_code}")
+
+    # ── 16k. Exam generate validation ──
+    print("\n[16k] POST /api/exam/generate validation")
+    r = client.post("/api/exam/generate", json={"topic": "", "count": 5})
+    check("empty topic rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/generate", json={"topic": "极限", "count": 0})
+    check("count=0 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/generate", json={"topic": "极限", "count": 11})
+    check("count=11 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/generate", json={"topic": "极限", "count": -1})
+    check("count=-1 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/exam/generate", json={"topic": "极限", "count": 5, "difficulty": "extreme"})
+    check("bad difficulty rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # ── 16l. Exam generate without API key → 503 ──
+    print("\n[16l] POST /api/exam/generate (no API key)")
+    import unittest.mock as mock
+    from app.routers import exam as exam_router
+    from app.services.llm import LLMConfigError
+
+    # Patch where it's used (exam_router namespace), not where it's defined (llm_mod)
+    original_fn = exam_router.generate_exam_questions
+    exam_router.generate_exam_questions = mock.AsyncMock(side_effect=LLMConfigError("未配置 OPENAI_API_KEY"))
+    try:
+        r = client.post("/api/exam/generate", json={"topic": "极限", "count": 3})
+        check("no api key returns 503", r.status_code == 503, f"got {r.status_code}, body={r.json()}")
+        check("detail mentions API Key", "API_KEY" in r.json().get("detail", "").upper(), f"detail={r.json().get('detail')}")
+    finally:
+        exam_router.generate_exam_questions = original_fn
+
+    # ── 16m. Exam generate with mock LLM (parse failure) ──
+    print("\n[16m] POST /api/exam/generate (mock LLM parse failure)")
+
+    async def _mock_llm_bad(*args, **kwargs):
+        return "This is not valid JSON at all."
+
+    original_fn_m = exam_router.generate_exam_questions
+    exam_router.generate_exam_questions = mock.AsyncMock(side_effect=_mock_llm_bad)
+    try:
+        r = client.post("/api/exam/generate", json={"topic": "极限", "count": 3, "use_materials": False})
+        check("parse failure 200", r.status_code == 200, f"got {r.status_code}")
+        body = r.json()
+        check("drafts is empty", body["drafts"] == [], f"got {body['drafts']}")
+        check("has raw_response", bool(body.get("raw_response")), f"raw_response={body.get('raw_response')}")
+        check("has parse_error", bool(body.get("parse_error")), f"parse_error={body.get('parse_error')}")
+        check("parse_error mentions JSON", "JSON" in body["parse_error"], f"parse_error={body['parse_error']}")
+    finally:
+        exam_router.generate_exam_questions = original_fn_m
+
+    # ── 16n. Exam generate with mock LLM (success, no DB write) ──
+    print("\n[16n] POST /api/exam/generate (mock LLM success, no DB write)")
+    mock_json = json.dumps([
+        {
+            "title": "AI生成-极限计算",
+            "subject": "高等数学",
+            "year": "模拟",
+            "question": "求极限 $\\lim_{x\\to 0} \\frac{e^x - 1}{x}$",
+            "answer": "1",
+            "solution": "由等价无穷小 $e^x - 1 \\sim x$，极限为 1。",
+            "tags": "极限,等价无穷小",
+        },
+        {
+            "title": "AI生成-导数计算",
+            "subject": "高等数学",
+            "year": "模拟",
+            "question": "求 $f(x) = x^3$ 的导数。",
+            "answer": "$f'(x) = 3x^2$",
+            "solution": "由幂函数求导法则，$f'(x) = 3x^{3-1} = 3x^2$。",
+            "tags": "导数,幂函数",
+        },
+    ])
+
+    async def _mock_llm_good(*args, **kwargs):
+        return mock_json
+
+    # Count exam questions before
+    r_before = client.get("/api/exam/questions")
+    count_before = len(r_before.json())
+
+    original_fn_n = exam_router.generate_exam_questions
+    exam_router.generate_exam_questions = mock.AsyncMock(side_effect=_mock_llm_good)
+    try:
+        r = client.post("/api/exam/generate", json={"topic": "极限与导数", "count": 2, "use_materials": False})
+        check("mock success 200", r.status_code == 200, f"got {r.status_code}")
+        body = r.json()
+        check("drafts length 2", len(body["drafts"]) == 2, f"got {len(body['drafts'])}")
+        check("draft 0 title matches", body["drafts"][0]["title"] == "AI生成-极限计算")
+        check("draft 1 title matches", body["drafts"][1]["title"] == "AI生成-导数计算")
+        check("no parse_error", body.get("parse_error") is None)
+        check("no raw_response", body.get("raw_response") is None)
+    finally:
+        exam_router.generate_exam_questions = original_fn_n
+
+    # Verify NO new exam questions were written to DB
+    r_after = client.get("/api/exam/questions")
+    count_after = len(r_after.json())
+    check("no DB writes from generate", count_after == count_before, f"before={count_before}, after={count_after}")
+
+    # ── 17. Export JSON ──
+    print("\n[17] GET /api/export/json")
+    # Create some test data first
+    r = client.post("/api/errors", json={"subject": "导出测试", "question": "导出错题"})
+    check("export: create error 200", r.status_code == 200)
+    export_err_id = r.json()["id"]
+
+    r = client.post("/api/plan", json={"date": "2099-01-01", "subject": "导出测试", "task": "导出计划"})
+    check("export: create plan 200", r.status_code == 200)
+    export_plan_id = r.json()["id"]
+
+    r = client.post("/api/exam/questions", json={"title": "导出真题", "question": "导出题目内容"})
+    check("export: create exam question 200", r.status_code == 200)
+    export_eq_id = r.json()["id"]
+
+    r = client.post(f"/api/exam/questions/{export_eq_id}/attempt", json={"user_answer": "导出答案"})
+    check("export: create attempt 200", r.status_code == 200)
+
+    # Now export
+    r = client.get("/api/export/json")
+    check("export status 200", r.status_code == 200, f"got {r.status_code}")
+    check("export content-type is json", "application/json" in r.headers.get("content-type", ""), f"ct={r.headers.get('content-type')}")
+
+    data = r.json()
+    check("has exported_at", "exported_at" in data)
+    check("has version", data.get("version") == "0.2")
+    check("has materials", "materials" in data)
+    check("has material_chunks_count", "material_chunks_count" in data)
+    check("has chat_history", "chat_history" in data)
+    check("has error_book", "error_book" in data)
+    check("has study_plans", "study_plans" in data)
+    check("has problems", "problems" in data)
+    check("has exam_questions", "exam_questions" in data)
+    check("has exam_attempts", "exam_attempts" in data)
+
+    # Materials should NOT contain full content
+    if data["materials"]:
+        check("material has no content field", "content" not in data["materials"][0])
+        check("material has content_length", "content_length" in data["materials"][0])
+
+    # Verify data counts match what we created
+    check("error_book has our entry", any(e["id"] == export_err_id for e in data["error_book"]))
+    check("study_plans has our entry", any(p["id"] == export_plan_id for p in data["study_plans"]))
+    check("exam_questions has our entry", any(q["id"] == export_eq_id for q in data["exam_questions"]))
+    check("exam_attempts has entry", len(data["exam_attempts"]) >= 1)
+
+    # Verify exam_attempt structure
+    attempt_item = data["exam_attempts"][0]
+    check("attempt has question_id", "question_id" in attempt_item)
+    check("attempt has user_answer", "user_answer" in attempt_item)
+    check("attempt has is_correct", "is_correct" in attempt_item)
+    check("attempt has created_at", "created_at" in attempt_item)
+
+    # Cleanup
+    r = client.delete(f"/api/errors/{export_err_id}")
+    check("export: cleanup error 200", r.status_code == 200)
+    r = client.delete(f"/api/plan/{export_plan_id}")
+    check("export: cleanup plan 200", r.status_code == 200)
+    r = client.delete(f"/api/exam/questions/{export_eq_id}")
+    check("export: cleanup exam 200", r.status_code == 200)
+
+    # ── 18. Review settings ──
+    print("\n[18] GET /api/settings/review (default)")
+    r = client.get("/api/settings/review")
+    check("get settings 200", r.status_code == 200)
+    check("default intervals [1,3,7,14]", r.json()["intervals"] == [1, 3, 7, 14], f"got {r.json()['intervals']}")
+
+    print("\n[18b] PUT /api/settings/review validation")
+    r = client.put("/api/settings/review", json={"intervals": []})
+    check("empty intervals 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.put("/api/settings/review", json={"intervals": [3, 1]})
+    check("non-increasing 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.put("/api/settings/review", json={"intervals": [1, 1, 3]})
+    check("equal values 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.put("/api/settings/review", json={"intervals": [0, 3]})
+    check("value < 1 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.put("/api/settings/review", json={"intervals": [1, 366]})
+    check("value > 365 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.put("/api/settings/review", json={"intervals": list(range(1, 12))})
+    check("> 10 elements rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    print("\n[18c] PUT /api/settings/review [2,5,10]")
+    r = client.put("/api/settings/review", json={"intervals": [2, 5, 10]})
+    check("put [2,5,10] 200", r.status_code == 200, f"got {r.status_code}")
+    check("returns [2,5,10]", r.json()["intervals"] == [2, 5, 10], f"got {r.json()['intervals']}")
+
+    r = client.get("/api/settings/review")
+    check("get confirms [2,5,10]", r.json()["intervals"] == [2, 5, 10], f"got {r.json()['intervals']}")
+
+    # ── 18d. Verify intervals affect error book review dates ──
+    print("\n[18d] Review intervals affect error book")
+    from app.utils.date import local_date_obj as _ld
+    from datetime import timedelta as _td
+
+    r = client.post("/api/errors", json={"subject": "策略测试", "question": "复习间隔测试"})
+    check("create test error 200", r.status_code == 200)
+    test_err_id = r.json()["id"]
+
+    # 1st mastered → interval[0] = 2 days
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": True})
+    check("1st master 200", r.status_code == 200)
+    e1 = r.json()
+    check("review_count=1", e1["review_count"] == 1)
+    expected1 = (_ld() + _td(days=2)).isoformat()
+    check("1st review +2d", e1["next_review_date"] == expected1, f"got {e1['next_review_date']}")
+
+    # unmaster
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": False})
+    check("unmaster 200", r.status_code == 200)
+
+    # 2nd mastered → interval[1] = 5 days
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": True})
+    check("2nd master 200", r.status_code == 200)
+    e2 = r.json()
+    check("review_count=2", e2["review_count"] == 2)
+    expected2 = (_ld() + _td(days=5)).isoformat()
+    check("2nd review +5d", e2["next_review_date"] == expected2, f"got {e2['next_review_date']}")
+
+    # unmaster
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": False})
+    check("unmaster2 200", r.status_code == 200)
+
+    # 3rd mastered → interval[2] = 10 days
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": True})
+    check("3rd master 200", r.status_code == 200)
+    e3 = r.json()
+    check("review_count=3", e3["review_count"] == 3)
+    expected3 = (_ld() + _td(days=10)).isoformat()
+    check("3rd review +10d", e3["next_review_date"] == expected3, f"got {e3['next_review_date']}")
+
+    # unmaster
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": False})
+    check("unmaster3 200", r.status_code == 200)
+
+    # 4th mastered → beyond array, uses last = 10 days
+    r = client.patch(f"/api/errors/{test_err_id}", json={"mastered": True})
+    check("4th master 200", r.status_code == 200)
+    e4 = r.json()
+    check("review_count=4", e4["review_count"] == 4)
+    expected4 = (_ld() + _td(days=10)).isoformat()
+    check("4th review +10d (last interval)", e4["next_review_date"] == expected4, f"got {e4['next_review_date']}")
+
+    # Cleanup
+    r = client.delete(f"/api/errors/{test_err_id}")
+    check("cleanup test error 200", r.status_code == 200)
+
+    # Reset to default
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("reset to default 200", r.status_code == 200)
+
+    # ── 19. Import preview and restore ──
+    print("\n[19] POST /api/import/preview (missing fields)")
+    r = client.post("/api/import/preview", json={"version": "0.2"})
+    check("missing fields 422", r.status_code == 422, f"got {r.status_code}")
+
+    print("\n[19b] POST /api/import/preview (valid)")
+    backup = {
+        "exported_at": "2026-01-01T00:00:00Z",
+        "version": "0.2",
+        "materials": [
+            {"filename": "导入资料.txt", "file_type": ".txt", "content_length": 100},
+            {"filename": "导入资料.txt", "file_type": ".txt", "content_length": 100},  # dup
+        ],
+        "material_chunks_count": 0,
+        "chat_history": [
+            {"question": "导入问题1", "answer": "导入答案1"},
+        ],
+        "error_book": [
+            {"question": "导入错题1", "error_type": "导入", "subject": "测试"},
+            {"question": "导入错题1", "error_type": "导入"},  # dup
+        ],
+        "study_plans": [
+            {"date": "2099-06-01", "subject": "导入科目", "task": "导入任务"},
+        ],
+        "problems": [
+            {"question": "导入解析题1", "solution": "导入解法1"},
+        ],
+        "exam_questions": [
+            {"id": 9001, "title": "导入真题1", "question": "导入题目1", "answer": "答案1", "subject": "测试"},
+            {"id": 9002, "title": "导入真题2", "question": "导入题目2", "answer": "答案2"},
+        ],
+        "exam_attempts": [
+            {"question_id": 9001, "user_answer": "导入答案A", "is_correct": False},
+            {"question_id": 9002, "user_answer": "导入答案B", "is_correct": True},
+            {"question_id": 99999, "user_answer": "无效题目", "is_correct": False},  # bad ref
+        ],
+    }
+    r = client.post("/api/import/preview", json=backup)
+    check("preview 200", r.status_code == 200)
+    pv = r.json()
+    check("preview error_book_count=2", pv["error_book_count"] == 2)
+    check("preview exam_questions_count=2", pv["exam_questions_count"] == 2)
+    check("preview exam_attempts_count=3", pv["exam_attempts_count"] == 3)
+
+    # Verify preview did NOT write to DB
+    r_before = client.get("/api/exam/questions")
+    count_before = len(r_before.json())
+
+    print("\n[19c] POST /api/import/json (first import)")
+    r = client.post("/api/import/json", json=backup)
+    check("import 200", r.status_code == 200)
+    result = r.json()
+    ins = result["inserted"]
+    skp = result["skipped"]
+    check("inserted 1 material (dup skipped)", ins["materials"] == 1, f"got ins={ins['materials']}, skp={skp['materials']}")
+    check("skipped 1 material dup", skp["materials"] == 1)
+    check("inserted 1 error (dup skipped)", ins["error_book"] == 1, f"got ins={ins['error_book']}, skp={skp['error_book']}")
+    check("skipped 1 error dup", skp["error_book"] == 1)
+    check("inserted 1 plan", ins["study_plans"] == 1)
+    check("inserted 1 problem", ins["problems"] == 1)
+    check("inserted 1 chat", ins["chat_history"] == 1)
+    check("inserted 2 exam_questions", ins["exam_questions"] == 2)
+    # Attempts: 9001 and 9002 should map to new question IDs; 99999 should skip
+    check("inserted 2 exam_attempts", ins["exam_attempts"] == 2, f"got {ins['exam_attempts']}")
+    check("skipped 1 exam_attempts (bad ref)", skp["exam_attempts"] == 1)
+
+    # Verify material has no content
+    r_mats = client.get("/api/materials")
+    imported_mats = [m for m in r_mats.json() if m["filename"] == "导入资料.txt"]
+    if imported_mats:
+        mid = imported_mats[0]["id"]
+        r_detail = client.get(f"/api/materials/{mid}")
+        check("imported material content empty", r_detail.json().get("preview", "") == "")
+
+    # Verify exam_attempts question_id mapped correctly
+    r_eqs = client.get("/api/exam/questions")
+    imported_eqs = {q["title"]: q["id"] for q in r_eqs.json() if q["title"].startswith("导入真题")}
+    eq1_id = imported_eqs.get("导入真题1")
+    eq2_id = imported_eqs.get("导入真题2")
+    if eq1_id and eq2_id:
+        async def _check_attempts():
+            async with async_session() as session:
+                r1 = await session.execute(text("SELECT COUNT(*) FROM exam_attempts WHERE question_id = :qid"), {"qid": eq1_id})
+                r2 = await session.execute(text("SELECT COUNT(*) FROM exam_attempts WHERE question_id = :qid"), {"qid": eq2_id})
+                return r1.scalar() or 0, r2.scalar() or 0
+        loop_chk = asyncio.new_event_loop()
+        a1, a2 = loop_chk.run_until_complete(_check_attempts())
+        loop_chk.close()
+        check("attempt mapped to eq1", a1 >= 1, f"got {a1}")
+        check("attempt mapped to eq2", a2 >= 1, f"got {a2}")
+
+    print("\n[19d] POST /api/import/json (second import, all dup)")
+    r = client.post("/api/import/json", json=backup)
+    check("reimport 200", r.status_code == 200)
+    result2 = r.json()
+    ins2 = result2["inserted"]
+    skp2 = result2["skipped"]
+    check("all materials skipped on reimport", ins2["materials"] == 0, f"got {ins2['materials']}")
+    check("all errors skipped on reimport", ins2["error_book"] == 0, f"got {ins2['error_book']}")
+    check("all plans skipped on reimport", ins2["study_plans"] == 0)
+    check("all problems skipped on reimport", ins2["problems"] == 0)
+    check("all chat skipped on reimport", ins2["chat_history"] == 0)
+    check("all exam_questions skipped on reimport", ins2["exam_questions"] == 0)
+
+    # Cleanup imported data
+    for q in r_eqs.json():
+        if q["title"].startswith("导入真题"):
+            client.delete(f"/api/exam/questions/{q['id']}")
+    for e in client.get("/api/errors").json():
+        if e["question"].startswith("导入错题"):
+            client.delete(f"/api/errors/{e['id']}")
+    for p in client.get("/api/plan").json():
+        if p.get("task", "").startswith("导入任务"):
+            client.delete(f"/api/plan/{p['id']}")
+
+    # ── 20. Dashboard trends ──
+    print("\n[20] GET /api/dashboard/trends")
+    r = client.get("/api/dashboard/trends", params={"days": 7})
+    check("trends 7d 200", r.status_code == 200)
+    t7 = r.json()
+    check("trends days=7", t7["days"] == 7)
+    check("trends has 7 items", len(t7["items"]) == 7, f"got {len(t7['items'])}")
+    check("item has date", "date" in t7["items"][0])
+    check("item has plans_total", "plans_total" in t7["items"][0])
+    check("item has plans_completed", "plans_completed" in t7["items"][0])
+    check("item has errors_created", "errors_created" in t7["items"][0])
+    check("item has errors_review_due", "errors_review_due" in t7["items"][0])
+    check("item has exam_attempts", "exam_attempts" in t7["items"][0])
+    check("item has exam_correct", "exam_correct" in t7["items"][0])
+
+    r = client.get("/api/dashboard/trends", params={"days": 30})
+    check("trends 30d 200", r.status_code == 200)
+    check("trends 30d has 30 items", len(r.json()["items"]) == 30)
+
+    r = client.get("/api/dashboard/trends", params={"days": 14})
+    check("trends 14d rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # ── 20b. Trends with test data ──
+    print("\n[20b] Trends with test data")
+    today_str = local_today()
+    today_iso = local_date_obj().isoformat()
+
+    # Create a plan for today
+    r = client.post("/api/plan", json={"date": today_str, "subject": "趋势测试", "task": "趋势任务A"})
+    check("trends: create plan 200", r.status_code == 200)
+    trend_plan_id = r.json()["id"]
+    client.patch(f"/api/plan/{trend_plan_id}", json={"completed": True})
+
+    r = client.post("/api/plan", json={"date": today_str, "subject": "趋势测试", "task": "趋势任务B"})
+    check("trends: create plan2 200", r.status_code == 200)
+    trend_plan_id2 = r.json()["id"]
+
+    # Create an error with next_review_date = today
+    r = client.post("/api/errors", json={"subject": "趋势测试", "question": "趋势待复习错题", "next_review_date": today_str})
+    check("trends: create error 200", r.status_code == 200)
+    trend_err_id = r.json()["id"]
+
+    # Create exam question + attempt
+    r = client.post("/api/exam/questions", json={"title": "趋势真题", "question": "趋势题目"})
+    check("trends: create eq 200", r.status_code == 200)
+    trend_eq_id = r.json()["id"]
+    r = client.post(f"/api/exam/questions/{trend_eq_id}/attempt", json={"user_answer": "趋势答案", "is_correct": True})
+    check("trends: create attempt 200", r.status_code == 200)
+
+    # Now check trends
+    r = client.get("/api/dashboard/trends", params={"days": 7})
+    check("trends with data 200", r.status_code == 200)
+    items = r.json()["items"]
+    today_item = [x for x in items if x["date"] == today_iso]
+    if today_item:
+        ti = today_item[0]
+        check("today plans_total >= 2", ti["plans_total"] >= 2, f"got {ti['plans_total']}")
+        check("today plans_completed >= 1", ti["plans_completed"] >= 1, f"got {ti['plans_completed']}")
+        check("today errors_review_due >= 1", ti["errors_review_due"] >= 1, f"got {ti['errors_review_due']}")
+        check("today exam_attempts >= 1", ti["exam_attempts"] >= 1, f"got {ti['exam_attempts']}")
+        check("today exam_correct >= 1", ti["exam_correct"] >= 1, f"got {ti['exam_correct']}")
+    else:
+        print("  SKIP  today not in trends items")
+
+    # Cleanup
+    client.delete(f"/api/plan/{trend_plan_id}")
+    client.delete(f"/api/plan/{trend_plan_id2}")
+    client.delete(f"/api/errors/{trend_err_id}")
+    client.delete(f"/api/exam/questions/{trend_eq_id}")
+
+    # ── 21. Global search ──
+    print("\n[21] GET /api/search validation")
+    r = client.get("/api/search", params={"q": ""})
+    check("empty q rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.get("/api/search", params={"q": "x", "limit": 0})
+    check("limit=0 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.get("/api/search", params={"q": "x", "limit": 51})
+    check("limit=51 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.get("/api/search", params={"q": "x", "types": "invalid"})
+    check("invalid types rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.get("/api/search", params={"q": "a" * 101})
+    check("q too long rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # ── 21b. Search with test data ──
+    print("\n[21b] Search with test data")
+    # Upload a material with searchable content
+    search_file = os.path.join(_tmp_dir, "search_test.txt")
+    with open(search_file, "w", encoding="utf-8") as f:
+        f.write("全局搜索测试卷积定理相关内容")
+    with open(search_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("search_test.txt", f, "text/plain")})
+    check("search: upload material 200", r.status_code == 200)
+    search_mat_id = r.json()["id"]
+
+    # Create error
+    r = client.post("/api/errors", json={"subject": "搜索测试", "question": "全局搜索卷积定理错题"})
+    check("search: create error 200", r.status_code == 200)
+    search_err_id = r.json()["id"]
+
+    # Create plan
+    r = client.post("/api/plan", json={"date": "2099-07-01", "subject": "搜索测试", "task": "全局搜索卷积定理计划"})
+    check("search: create plan 200", r.status_code == 200)
+    search_plan_id = r.json()["id"]
+
+    # Create exam question
+    r = client.post("/api/exam/questions", json={"title": "搜索真题", "question": "全局搜索卷积定理题目"})
+    check("search: create exam 200", r.status_code == 200)
+    search_eq_id = r.json()["id"]
+
+    # Search all types
+    r = client.get("/api/search", params={"q": "卷积定理", "limit": 50})
+    check("search all types 200", r.status_code == 200)
+    sr = r.json()
+    check("search has query", sr["query"] == "卷积定理")
+    types_found = {x["type"] for x in sr["results"]}
+    check("found material results", "material" in types_found, f"types={types_found}")
+    check("found error results", "error" in types_found, f"types={types_found}")
+    check("found plan results", "plan" in types_found, f"types={types_found}")
+    check("found exam results", "exam" in types_found, f"types={types_found}")
+
+    # Verify snippets are plain text (no HTML)
+    for item in sr["results"]:
+        check(f"snippet no HTML ({item['type']})", "<" not in item["snippet"], f"snippet={item['snippet'][:50]}")
+
+    # Search with type filter
+    r = client.get("/api/search", params={"q": "卷积定理", "types": "errors,exam", "limit": 20})
+    check("filtered search 200", r.status_code == 200)
+    filtered_types = {x["type"] for x in r.json()["results"]}
+    check("filtered only errors+exam", filtered_types <= {"error", "exam"}, f"types={filtered_types}")
+
+    # Verify search result IDs are correct entity IDs
+    r = client.get("/api/search", params={"q": "卷积定理", "limit": 50})
+    sr = r.json()
+    for item in sr["results"]:
+        if item["type"] == "material":
+            check("material id is entity id", item["id"] == search_mat_id, f"got {item['id']}, expected {search_mat_id}")
+        elif item["type"] == "error":
+            check("error id is entity id", item["id"] == search_err_id, f"got {item['id']}, expected {search_err_id}")
+        elif item["type"] == "plan":
+            check("plan id is entity id", item["id"] == search_plan_id, f"got {item['id']}, expected {search_plan_id}")
+        elif item["type"] == "exam":
+            check("exam id is entity id", item["id"] == search_eq_id, f"got {item['id']}, expected {search_eq_id}")
+
+    # Cleanup
+    client.delete(f"/api/materials/{search_mat_id}")
+    client.delete(f"/api/errors/{search_err_id}")
+    client.delete(f"/api/plan/{search_plan_id}")
+    client.delete(f"/api/exam/questions/{search_eq_id}")
+
+    # ── 22. Study sessions ──
+    print("\n[22] POST /api/sessions/start")
+    r = client.post("/api/sessions/start", json={"subject": "高数", "note": "复习极限"})
+    check("start session 200", r.status_code == 200)
+    sess = r.json()
+    sess_id = sess["id"]
+    check("session has id", sess_id is not None)
+    check("session subject", sess["subject"] == "高数")
+    check("session note", sess["note"] == "复习极限")
+    check("session started_at not null", sess["started_at"] is not None)
+    check("session ended_at is null", sess["ended_at"] is None)
+    check("session duration_minutes is 0", sess["duration_minutes"] == 0)
+
+    # Second start should return 409
+    r = client.post("/api/sessions/start", json={"subject": "线代"})
+    check("second start 409", r.status_code == 409, f"got {r.status_code}")
+
+    # Active should return the session
+    r = client.get("/api/sessions/active")
+    check("active 200", r.status_code == 200)
+    check("active is not null", r.json() is not None)
+    check("active id matches", r.json()["id"] == sess_id)
+
+    # Stop the session
+    import time
+    time.sleep(1)  # ensure duration > 0
+    r = client.post(f"/api/sessions/{sess_id}/stop")
+    check("stop session 200", r.status_code == 200)
+    stopped = r.json()
+    check("stopped ended_at not null", stopped["ended_at"] is not None)
+    check("stopped duration_minutes >= 1", stopped["duration_minutes"] >= 1, f"got {stopped['duration_minutes']}")
+
+    # Active should be null now
+    r = client.get("/api/sessions/active")
+    check("active is null after stop", r.json() is None)
+
+    # Double stop should return 409
+    r = client.post(f"/api/sessions/{sess_id}/stop")
+    check("double stop 409", r.status_code == 409, f"got {r.status_code}")
+
+    # List should contain the session
+    r = client.get("/api/sessions", params={"limit": 10})
+    check("list sessions 200", r.status_code == 200)
+    check("list contains our session", any(s["id"] == sess_id for s in r.json()))
+
+    # Dashboard should show today_study_minutes
+    r = client.get("/api/dashboard")
+    check("dashboard has today_study_minutes", "today_study_minutes" in r.json())
+    check("today_study_minutes >= 1", r.json()["today_study_minutes"] >= 1, f"got {r.json()['today_study_minutes']}")
+
+    # Trends should include study_minutes
+    r = client.get("/api/dashboard/trends", params={"days": 7})
+    check("trends has study_minutes", "study_minutes" in r.json()["items"][0])
+    today_trend = [x for x in r.json()["items"] if x["date"] == local_today()]
+    if today_trend:
+        check("today study_minutes >= 1", today_trend[0]["study_minutes"] >= 1, f"got {today_trend[0]['study_minutes']}")
+
+    # Stop on nonexistent
+    r = client.post("/api/sessions/99999/stop")
+    check("stop nonexistent 404", r.status_code == 404, f"got {r.status_code}")
+
+    # Limit validation
+    r = client.get("/api/sessions", params={"limit": 0})
+    check("limit=0 rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.get("/api/sessions", params={"limit": 101})
+    check("limit=101 rejected 422", r.status_code == 422, f"got {r.status_code}")
 
 
 # ── Main ──

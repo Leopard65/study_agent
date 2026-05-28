@@ -3,9 +3,15 @@ import axios, { isAxiosError } from 'axios';
 const api = axios.create({ baseURL: '/api' });
 
 // ── Types ──
+export interface ChatSource {
+  material_id: number;
+  filename: string;
+  snippet: string;
+}
+
 export interface ChatResponse {
   answer: string;
-  sources: string[];
+  sources: ChatSource[];
 }
 
 export interface ChatHistoryItem {
@@ -101,6 +107,8 @@ export interface DashboardStats {
   total_errors: number;
   unmastered_errors: number;
   streak_days: number;
+  today_review_errors: number;
+  today_study_minutes: number;
 }
 
 // ── Chat ──
@@ -188,6 +196,174 @@ export const generatePlan = (data: {
 // ── Dashboard ──
 export const getDashboard = (): Promise<DashboardStats> =>
   api.get<DashboardStats>('/dashboard').then(r => r.data);
+
+export interface TrendDay {
+  date: string;
+  plans_total: number;
+  plans_completed: number;
+  errors_created: number;
+  errors_review_due: number;
+  exam_attempts: number;
+  exam_correct: number;
+  study_minutes: number;
+}
+
+export interface TrendsResponse {
+  days: number;
+  items: TrendDay[];
+}
+
+export const getDashboardTrends = (days: number = 7): Promise<TrendsResponse> =>
+  api.get<TrendsResponse>('/dashboard/trends', { params: { days } }).then(r => r.data);
+
+// ── Exam ──
+export interface ExamQuestionItem {
+  id: number;
+  title: string;
+  subject: string;
+  year: string;
+  question: string;
+  answer: string;
+  solution: string;
+  tags: string;
+  created_at: string | null;
+}
+
+export interface ExamAttemptItem {
+  id: number;
+  question_id: number;
+  user_answer: string;
+  is_correct: boolean;
+  created_at: string | null;
+}
+
+export interface ExamDraftItem {
+  title: string;
+  subject: string;
+  year: string;
+  question: string;
+  answer: string;
+  solution: string;
+  tags: string;
+}
+
+export interface ExamGenerateResponse {
+  drafts: ExamDraftItem[];
+  raw_response?: string;
+  parse_error?: string;
+}
+
+export const listExamQuestions = (params?: { subject?: string; year?: string; tag?: string }): Promise<ExamQuestionItem[]> =>
+  api.get<ExamQuestionItem[]>('/exam/questions', { params: params || {} }).then(r => r.data);
+
+export const getExamQuestion = (id: number): Promise<ExamQuestionItem> =>
+  api.get<ExamQuestionItem>(`/exam/questions/${id}`).then(r => r.data);
+
+export const createExamQuestion = (data: {
+  title: string;
+  subject?: string;
+  year?: string;
+  question: string;
+  answer?: string;
+  solution?: string;
+  tags?: string;
+}): Promise<ExamQuestionItem> => api.post<ExamQuestionItem>('/exam/questions', data).then(r => r.data);
+
+export const generateExamQuestions = (data: {
+  subject?: string;
+  topic: string;
+  count?: number;
+  difficulty?: string;
+  use_materials?: boolean;
+}): Promise<ExamGenerateResponse> => api.post<ExamGenerateResponse>('/exam/generate', data).then(r => r.data);
+
+export const submitExamAttempt = (questionId: number, data: { user_answer?: string; is_correct?: boolean }): Promise<ExamAttemptItem> =>
+  api.post<ExamAttemptItem>(`/exam/questions/${questionId}/attempt`, data).then(r => r.data);
+
+export const addExamToErrors = (questionId: number): Promise<ErrorBookItem> =>
+  api.post<ErrorBookItem>(`/exam/questions/${questionId}/add-to-errors`).then(r => r.data);
+
+export const deleteExamQuestion = (id: number): Promise<OkResponse> =>
+  api.delete<OkResponse>(`/exam/questions/${id}`).then(r => r.data);
+
+// ── Export ──
+export const exportJson = (): Promise<Blob> =>
+  api.get('/export/json', { responseType: 'blob' }).then(r => r.data);
+
+// ── Import ──
+export interface ImportPreview {
+  version: string;
+  exported_at: string;
+  materials_count: number;
+  error_book_count: number;
+  study_plans_count: number;
+  problems_count: number;
+  chat_history_count: number;
+  exam_questions_count: number;
+  exam_attempts_count: number;
+}
+
+export interface ImportResult {
+  inserted: Record<string, number>;
+  skipped: Record<string, number>;
+}
+
+export const importPreview = (data: Record<string, unknown>): Promise<ImportPreview> =>
+  api.post<ImportPreview>('/import/preview', data).then(r => r.data);
+
+export const importJson = (data: Record<string, unknown>): Promise<ImportResult> =>
+  api.post<ImportResult>('/import/json', data).then(r => r.data);
+
+// ── Settings ──
+export const getReviewSettings = (): Promise<{ intervals: number[] }> =>
+  api.get('/settings/review').then(r => r.data);
+
+export const updateReviewSettings = (intervals: number[]): Promise<{ intervals: number[] }> =>
+  api.put('/settings/review', { intervals }).then(r => r.data);
+
+// ── Study Sessions ──
+export interface StudySessionItem {
+  id: number;
+  subject: string;
+  note: string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_minutes: number;
+  created_at: string | null;
+}
+
+export const getActiveSession = (): Promise<StudySessionItem | null> =>
+  api.get<StudySessionItem | null>('/sessions/active').then(r => r.data);
+
+export const startSession = (data?: { subject?: string; note?: string }): Promise<StudySessionItem> =>
+  api.post<StudySessionItem>('/sessions/start', data || {}).then(r => r.data);
+
+export const stopSession = (id: number): Promise<StudySessionItem> =>
+  api.post<StudySessionItem>(`/sessions/${id}/stop`).then(r => r.data);
+
+export const listSessions = (limit?: number): Promise<StudySessionItem[]> =>
+  api.get<StudySessionItem[]>('/sessions', { params: { limit: limit || 20 } }).then(r => r.data);
+
+// ── Global Search ──
+export interface SearchResult {
+  type: string;
+  id: number;
+  title: string;
+  snippet: string;
+  created_at: string | null;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+}
+
+export const globalSearch = (q: string, types?: string, limit?: number): Promise<SearchResponse> => {
+  const params: Record<string, string | number> = { q };
+  if (types) params.types = types;
+  if (limit) params.limit = limit;
+  return api.get<SearchResponse>('/search', { params }).then(r => r.data);
+};
 
 // ── Health ──
 export const getHealth = (): Promise<HealthStatus> =>

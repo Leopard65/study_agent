@@ -1,17 +1,26 @@
-from pydantic import BaseModel, Field
+import re
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from typing import Optional
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ── Chat ──
 class ChatRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=5000)
     context: Optional[str] = None
+
+
+class ChatSource(BaseModel):
+    material_id: int
+    filename: str
+    snippet: str
 
 
 class ChatResponse(BaseModel):
     answer: str
-    sources: list[str] = []
+    sources: list[ChatSource] = []
 
 
 class ChatHistoryItem(BaseModel):
@@ -51,7 +60,7 @@ class MaterialDetail(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=500)
     limit: int = Field(default=10, ge=1, le=50)
 
 
@@ -66,7 +75,7 @@ class ErrorBookCreate(BaseModel):
     subject: Optional[str] = ""
     chapter: Optional[str] = ""
     knowledge_point: Optional[str] = ""
-    question: str
+    question: str = Field(..., min_length=1, max_length=10000)
     user_answer: Optional[str] = ""
     correct_answer: Optional[str] = ""
     error_type: Optional[str] = ""
@@ -76,11 +85,25 @@ class ErrorBookCreate(BaseModel):
     tags: Optional[str] = ""
     next_review_date: Optional[str] = ""
 
+    @field_validator("next_review_date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        if v and not _DATE_RE.match(v):
+            raise ValueError("日期格式必须为 YYYY-MM-DD")
+        return v
+
 
 class ErrorBookUpdate(BaseModel):
     mastered: Optional[bool] = None
     next_review_date: Optional[str] = None
     review_count: Optional[int] = None
+
+    @field_validator("next_review_date")
+    @classmethod
+    def validate_date(cls, v: str | None) -> str | None:
+        if v is not None and v and not _DATE_RE.match(v):
+            raise ValueError("日期格式必须为 YYYY-MM-DD")
+        return v
 
 
 class ErrorBookItem(BaseModel):
@@ -107,9 +130,16 @@ class ErrorBookItem(BaseModel):
 
 # ── Study Plan ──
 class StudyPlanCreate(BaseModel):
-    date: str
-    subject: str
-    task: str
+    date: str = Field(..., min_length=1)
+    subject: str = Field(..., min_length=1, max_length=200)
+    task: str = Field(..., min_length=1, max_length=5000)
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        if not _DATE_RE.match(v):
+            raise ValueError("日期格式必须为 YYYY-MM-DD")
+        return v
 
 
 class StudyPlanUpdate(BaseModel):
@@ -129,10 +159,25 @@ class StudyPlanItem(BaseModel):
 
 
 class PlanGenerateRequest(BaseModel):
-    subjects: list[str]
-    daily_hours: int = 8
+    subjects: list[str] = Field(..., min_length=1, max_length=20)
+    daily_hours: int = Field(default=8, ge=1, le=16)
     start_date: str = ""
-    days: int = 7
+    days: int = Field(default=7, ge=1, le=365)
+
+    @field_validator("start_date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        if v and not _DATE_RE.match(v):
+            raise ValueError("日期格式必须为 YYYY-MM-DD")
+        return v
+
+    @field_validator("subjects")
+    @classmethod
+    def validate_subjects(cls, v: list[str]) -> list[str]:
+        cleaned = [s.strip() for s in v if s.strip()]
+        if not cleaned:
+            raise ValueError("至少需要一个有效的科目")
+        return cleaned
 
 
 class PlanGenerateResponse(BaseModel):
@@ -143,7 +188,7 @@ class PlanGenerateResponse(BaseModel):
 
 # ── Problem ──
 class ProblemRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=10000)
     subject: Optional[str] = ""
 
 
@@ -162,6 +207,79 @@ class ProblemItem(BaseModel):
         from_attributes = True
 
 
+# ── Exam ──
+class ExamQuestionCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    subject: Optional[str] = ""
+    year: Optional[str] = ""
+    question: str = Field(..., min_length=1, max_length=10000)
+    answer: Optional[str] = ""
+    solution: Optional[str] = ""
+    tags: Optional[str] = ""
+
+    @field_validator("year")
+    @classmethod
+    def validate_year(cls, v: str) -> str:
+        if v and not re.match(r"^\d{4}$", v):
+            raise ValueError("年份格式必须为 YYYY")
+        return v
+
+
+class ExamQuestionItem(BaseModel):
+    id: int
+    title: str
+    subject: str
+    year: str
+    question: str
+    answer: str
+    solution: str
+    tags: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ExamAttemptCreate(BaseModel):
+    user_answer: str = ""
+    is_correct: bool = False
+
+
+class ExamAttemptItem(BaseModel):
+    id: int
+    question_id: int
+    user_answer: str
+    is_correct: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ExamGenerateRequest(BaseModel):
+    subject: str = Field(default="", max_length=100)
+    topic: str = Field(..., min_length=1, max_length=500)
+    count: int = Field(default=5, ge=1, le=10)
+    difficulty: Optional[str] = Field(default=None, pattern=r"^(easy|medium|hard)$")
+    use_materials: bool = True
+
+
+class ExamDraftItem(BaseModel):
+    title: str = ""
+    subject: str = ""
+    year: str = ""
+    question: str = ""
+    answer: str = ""
+    solution: str = ""
+    tags: str = ""
+
+
+class ExamGenerateResponse(BaseModel):
+    drafts: list[ExamDraftItem] = []
+    raw_response: Optional[str] = None
+    parse_error: Optional[str] = None
+
+
 # ── Dashboard ──
 class DashboardStats(BaseModel):
     today_tasks: int
@@ -170,3 +288,11 @@ class DashboardStats(BaseModel):
     total_errors: int
     unmastered_errors: int
     streak_days: int
+    today_review_errors: int = 0
+    today_study_minutes: int = 0
+
+
+# ── Study Session ──
+class StudySessionStartRequest(BaseModel):
+    subject: str = Field(default="", max_length=100)
+    note: str = Field(default="", max_length=500)

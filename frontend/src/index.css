@@ -1,2 +1,14 @@
 @import "tailwindcss";
 @import "katex/dist/katex.min.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  .dark {
+    color-scheme: dark;
+  }
+  .dark body {
+    background-color: #111827;
+    color: #f3f4f6;
+  }
+}
