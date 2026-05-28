@@ -1282,6 +1282,71 @@ def run(client: TestClient):
     r = client.get("/api/sessions", params={"limit": 101})
     check("limit=101 rejected 422", r.status_code == 422, f"got {r.status_code}")
 
+    # ── 23. Error stats ──
+    print("\n[23] GET /api/errors/stats (empty)")
+    r = client.get("/api/errors/stats")
+    check("stats 200", r.status_code == 200)
+    s = r.json()
+    check("stats total=0", s["total"] == 0)
+    check("stats mastered=0", s["mastered"] == 0)
+    check("stats unmastered=0", s["unmastered"] == 0)
+    check("stats due_today=0", s["due_today"] == 0)
+    check("stats by_subject is list", isinstance(s["by_subject"], list))
+    check("stats by_error_type is list", isinstance(s["by_error_type"], list))
+    check("stats by_knowledge_point is list", isinstance(s["by_knowledge_point"], list))
+    check("stats created_last_30_days len=30", len(s["created_last_30_days"]) == 30, f"got {len(s['created_last_30_days'])}")
+
+    # ── 23b. Stats with test data ──
+    print("\n[23b] Stats with test data")
+    stats_errs = []
+    for subj, etype, kp in [
+        ("高数", "计算错误", "极限"),
+        ("高数", "概念错误", "极限"),
+        ("线代", "计算错误", "矩阵"),
+        ("概率", "", "分布"),
+        ("概率", "计算错误", ""),
+    ]:
+        r = client.post("/api/errors", json={"subject": subj, "error_type": etype, "knowledge_point": kp, "question": f"stats-{subj}-{kp}"})
+        check(f"create stats error {subj} 200", r.status_code == 200)
+        stats_errs.append(r.json()["id"])
+
+    # Master one
+    client.patch(f"/api/errors/{stats_errs[0]}", json={"mastered": True})
+
+    # Set one with today as review date
+    client.patch(f"/api/errors/{stats_errs[2]}", json={"next_review_date": local_today()})
+
+    r = client.get("/api/errors/stats")
+    check("stats with data 200", r.status_code == 200)
+    s = r.json()
+    check("stats total >= 5", s["total"] >= 5, f"got {s['total']}")
+    check("stats mastered >= 1", s["mastered"] >= 1, f"got {s['mastered']}")
+    check("stats unmastered >= 4", s["unmastered"] >= 4, f"got {s['unmastered']}")
+    check("stats due_today >= 1", s["due_today"] >= 1, f"got {s['due_today']}")
+
+    # by_subject should have 高数, 概率, 线代
+    subj_names = {x["name"] for x in s["by_subject"]}
+    check("by_subject has 高数", "高数" in subj_names, f"got {subj_names}")
+    check("by_subject has 线代", "线代" in subj_names, f"got {subj_names}")
+
+    # by_error_type should have 计算错误, 未分类
+    etype_names = {x["name"] for x in s["by_error_type"]}
+    check("by_error_type has 计算错误", "计算错误" in etype_names, f"got {etype_names}")
+    check("by_error_type has 未分类", "未分类" in etype_names, f"got {etype_names}")
+
+    # by_knowledge_point should have 极限, 矩阵
+    kp_names = {x["name"] for x in s["by_knowledge_point"]}
+    check("by_kp has 极限", "极限" in kp_names, f"got {kp_names}")
+
+    # created_last_30_days last entry is today with count >= 5
+    today_entry = s["created_last_30_days"][-1]
+    check("today entry date", today_entry["date"] == local_today(), f"got {today_entry['date']}")
+    check("today entry count >= 5", today_entry["count"] >= 5, f"got {today_entry['count']}")
+
+    # Cleanup
+    for eid in stats_errs:
+        client.delete(f"/api/errors/{eid}")
+
 
 # ── Main ──
 with TestClient(app) as client:

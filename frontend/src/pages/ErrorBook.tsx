@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { listErrors, createError, updateError, deleteError, getReviewSettings, updateReviewSettings, getApiErrorMessage } from '../api/client';
-import type { ErrorBookItem } from '../api/client';
+import { listErrors, createError, updateError, deleteError, getReviewSettings, updateReviewSettings, getErrorStats, getApiErrorMessage } from '../api/client';
+import type { ErrorBookItem, ErrorStats } from '../api/client';
 import LatexRenderer from '../components/LatexRenderer';
 import { formatLocalDate } from '../utils/date';
 
@@ -34,6 +34,113 @@ function fetchErrorsByFilter(filter: Filter): Promise<ErrorBookItem[]> {
   return listErrors(mastered);
 }
 
+function BarRow({ label, count, max, color }: { label: string; count: number; max: number; color: string }) {
+  const pct = max > 0 ? Math.round((count / max) * 100) : 0;
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <span className="w-24 truncate text-gray-600 dark:text-gray-300 shrink-0" title={label}>{label}</span>
+      <div className="flex-1 h-4 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden">
+        <div className={`h-full ${color} rounded`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="w-8 text-right text-gray-500 dark:text-gray-400 text-xs">{count}</span>
+    </div>
+  );
+}
+
+function ErrorStatsPanel({ stats }: { stats: ErrorStats }) {
+  const maxSubject = Math.max(1, ...stats.by_subject.map(s => s.count));
+  const maxType = Math.max(1, ...stats.by_error_type.map(s => s.count));
+  const maxKp = Math.max(1, ...stats.by_knowledge_point.map(s => s.count));
+  const maxTrend = Math.max(1, ...stats.created_last_30_days.map(d => d.count));
+
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 space-y-5">
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: '总错题', value: stats.total, color: 'text-gray-800 dark:text-gray-100' },
+          { label: '已掌握', value: stats.mastered, color: 'text-green-600' },
+          { label: '未掌握', value: stats.unmastered, color: 'text-orange-500' },
+          { label: '今日待复习', value: stats.due_today, color: 'text-red-500' },
+        ].map(c => (
+          <div key={c.label} className="bg-gray-50 dark:bg-gray-700 rounded-lg p-3 text-center">
+            <div className={`text-2xl font-bold ${c.color}`}>{c.value}</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{c.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Distributions */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* By subject */}
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">科目分布</h4>
+          {stats.by_subject.length === 0 ? (
+            <p className="text-xs text-gray-400">暂无数据</p>
+          ) : (
+            <div className="space-y-1.5">
+              {stats.by_subject.map(s => (
+                <BarRow key={s.name} label={s.name} count={s.count} max={maxSubject} color="bg-blue-500" />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* By error type */}
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">错误类型</h4>
+          {stats.by_error_type.length === 0 ? (
+            <p className="text-xs text-gray-400">暂无数据</p>
+          ) : (
+            <div className="space-y-1.5">
+              {stats.by_error_type.map(s => (
+                <BarRow key={s.name} label={s.name} count={s.count} max={maxType} color="bg-red-400" />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* By knowledge point */}
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">知识点 Top 10</h4>
+          {stats.by_knowledge_point.length === 0 ? (
+            <p className="text-xs text-gray-400">暂无数据</p>
+          ) : (
+            <div className="space-y-1.5">
+              {stats.by_knowledge_point.map(s => (
+                <BarRow key={s.name} label={s.name} count={s.count} max={maxKp} color="bg-purple-400" />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 30-day trend */}
+      <div>
+        <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">最近 30 天新增错题</h4>
+        <div className="flex items-end gap-px h-20">
+          {stats.created_last_30_days.map(d => {
+            const h = maxTrend > 0 ? Math.max(1, Math.round((d.count / maxTrend) * 100)) : 1;
+            return (
+              <div key={d.date} className="flex-1 flex flex-col items-center justify-end h-full group">
+                <div
+                  className="w-full bg-teal-400 dark:bg-teal-500 rounded-t"
+                  style={{ height: `${h}%` }}
+                  title={`${d.date}: ${d.count}`}
+                />
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+          <span>{stats.created_last_30_days[0]?.date.slice(5)}</span>
+          <span>{stats.created_last_30_days[stats.created_last_30_days.length - 1]?.date.slice(5)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ErrorBook() {
   const [searchParams, setSearchParams] = useSearchParams();
   const filter = getFilterFromSearchParams(searchParams);
@@ -54,6 +161,12 @@ export default function ErrorBook() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const effectSeq = useRef(0);
+
+  // Stats
+  const [showStats, setShowStats] = useState(false);
+  const [stats, setStats] = useState<ErrorStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState('');
 
   useEffect(() => {
     const seq = ++effectSeq.current;
@@ -104,6 +217,19 @@ export default function ErrorBook() {
       setSettingsError(getApiErrorMessage(err, '加载复习策略失败。'));
     } finally {
       setSettingsLoading(false);
+    }
+  }, []);
+
+  const loadStats = useCallback(async () => {
+    setStatsLoading(true);
+    setStatsError('');
+    try {
+      const data = await getErrorStats();
+      setStats(data);
+    } catch (err) {
+      setStatsError(getApiErrorMessage(err, '加载统计数据失败。'));
+    } finally {
+      setStatsLoading(false);
     }
   }, []);
 
@@ -193,6 +319,26 @@ export default function ErrorBook() {
             {{ all: '全部', unmastered: '未掌握', mastered: '已掌握', review: '今日复习' }[f]}
           </button>
         ))}
+      </div>
+
+      {/* Stats toggle */}
+      <div className="mb-4">
+        <button
+          onClick={() => {
+            if (!showStats) loadStats();
+            setShowStats(!showStats);
+          }}
+          className="text-xs text-gray-400 hover:text-gray-600"
+        >
+          {showStats ? '收起错题统计' : '错题统计分析'} ▸
+        </button>
+        {showStats && (
+          <div className="mt-3">
+            {statsLoading && <p className="text-sm text-gray-400">加载中...</p>}
+            {statsError && <p className="text-sm text-red-500">{statsError}</p>}
+            {stats && <ErrorStatsPanel stats={stats} />}
+          </div>
+        )}
       </div>
 
       {error && (

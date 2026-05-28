@@ -25,7 +25,7 @@
 | AI 问答 | `/qa` | 对话式问答，自动检索资料库（RAG），LaTeX 公式渲染 |
 | 资料库 | `/materials` | 上传 PDF/Word/TXT/MD，分块索引，中文关键词检索，可查看资料详情和解析文本预览，删除时同步清理文件和索引 |
 | 题目解析 | `/problems` | 输入题目，AI 返回完整解题步骤，可一键加入错题本 |
-| 错题本 | `/errors` | 科目/章节/知识点/错误类型/标签/复习时间，掌握状态筛选，今日复习筛选，可配置复习间隔（默认 1/3/7/14 天），LaTeX 渲染 |
+| 错题本 | `/errors` | 科目/章节/知识点/错误类型/标签/复习时间，掌握状态筛选，今日复习筛选，可配置复习间隔（默认 1/3/7/14 天），LaTeX 渲染，统计分析（科目/错误类型/知识点分布、30 天趋势） |
 | 学习计划 | `/plan` | 手动添加 + AI 一键生成（JSON 解析，失败可查看原始返回），按日分组，勾选完成 |
 | 真题练习 | `/exam` | 真题题库（按科目/年份/标签筛选），AI 生成练习题草稿（检索资料库辅助出题），逐题预览确认后保存，提交答案，查看参考答案与解析，一键加入错题本，LaTeX 渲染 |
 | 全局搜索 | `/search` | 跨模块搜索资料/错题/计划/真题/问答/解析，支持类型筛选，点击跳转并定位到具体数据 |
@@ -287,6 +287,16 @@ OCR_LANG=chi_sim+eng
 - `errors_review_due` 口径：`next_review_date == 当日` 且 `mastered=false`
 - 纯 CSS 实现，无图表库依赖，移动端不溢出
 
+## 错题统计分析
+
+- 错题本页面可展开"错题统计分析"面板
+- 概览卡片：总错题、已掌握、未掌握、今日待复习
+- 科目分布、错误类型分布、知识点 Top 10 条形图
+- 最近 30 天新增错题趋势图
+- 空值字段归为"未分类"，分布取前 10
+- `due_today` 口径与 Dashboard 今日复习一致（`next_review_date <= today` 且 `mastered=false`）
+- 纯 CSS 条形图实现，无图表库依赖，支持深色模式
+
 ## 全局搜索
 
 - 统一搜索入口 `/search`，同时检索资料、错题、学习计划、真题、聊天历史、题目解析
@@ -343,6 +353,7 @@ OCR_LANG=chi_sim+eng
 | GET | `/api/problems/history` | 解析历史 |
 | POST | `/api/errors` | 添加错题 |
 | GET | `/api/errors` | 错题列表（支持 mastered/subject 筛选） |
+| GET | `/api/errors/stats` | 错题统计分析（总数/掌握/待复习、科目/错误类型/知识点分布、30 天新增趋势） |
 | PATCH | `/api/errors/{id}` | 更新错题状态 |
 | DELETE | `/api/errors/{id}` | 删除错题 |
 | POST | `/api/plan` | 添加计划 |
@@ -401,7 +412,7 @@ npm run lint
 npm run build
 ```
 
-截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏（使用统一时区 helper）、工作台统计（含 today_review_errors 时区一致性、未来日期不计入复习数）、输入校验（空值/格式/范围 422，含 chat 和 plan/generate 边界值及纯空白科目拒绝）、搜索片段安全、真题练习 CRUD（创建/列表/筛选/详情/提交答案/加入错题本/删除级联）、真题输入校验（空标题/空题目/错误年份格式/不存在 ID 404）、真题加入错题本去重（重复添加返回 409）、AI 生成练习题草稿（count 越界/空 topic 422、无 API key 503、JSON 解析失败返回 parse_error、mock 成功不写入数据库）、数据导出 JSON（endpoint 200、关键字段存在、materials 不含完整 content、exam_attempts 结构完整、数据条数一致）、复习策略配置（默认值、PUT 校验、非递增/空/越界 422、自定义间隔影响错题复习日期、超出长度使用最后间隔）、数据导入恢复（预检不写 DB、导入后数量增加、二次导入跳过重复、exam_attempts question_id 映射、缺少字段 422、materials 不导入 content）、学习趋势洞察（days=7/30、非法 days 422、插入测试数据后统计正确）、全局搜索（空 q/limit 越界 422、类型过滤、插入各类数据后搜到对应类型、snippet 不含 HTML、搜索结果 ID 为实体 ID 非 chunk ID）、学习会话/专注计时（start/stop/active/list、重复 start 409、double stop 409、duration_minutes 计算、dashboard today_study_minutes、trends study_minutes），结果为 `351 passed, 0 failed`。
+截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏（使用统一时区 helper）、工作台统计（含 today_review_errors 时区一致性、未来日期不计入复习数）、输入校验（空值/格式/范围 422，含 chat 和 plan/generate 边界值及纯空白科目拒绝）、搜索片段安全、真题练习 CRUD（创建/列表/筛选/详情/提交答案/加入错题本/删除级联）、真题输入校验（空标题/空题目/错误年份格式/不存在 ID 404）、真题加入错题本去重（重复添加返回 409）、AI 生成练习题草稿（count 越界/空 topic 422、无 API key 503、JSON 解析失败返回 parse_error、mock 成功不写入数据库）、数据导出 JSON（endpoint 200、关键字段存在、materials 不含完整 content、exam_attempts 结构完整、数据条数一致）、复习策略配置（默认值、PUT 校验、非递增/空/越界 422、自定义间隔影响错题复习日期、超出长度使用最后间隔）、数据导入恢复（预检不写 DB、导入后数量增加、二次导入跳过重复、exam_attempts question_id 映射、缺少字段 422、materials 不导入 content）、学习趋势洞察（days=7/30、非法 days 422、插入测试数据后统计正确）、全局搜索（空 q/limit 越界 422、类型过滤、插入各类数据后搜到对应类型、snippet 不含 HTML、搜索结果 ID 为实体 ID 非 chunk ID）、学习会话/专注计时（start/stop/active/list、重复 start 409、double stop 409、duration_minutes 计算、dashboard today_study_minutes、trends study_minutes）、错题统计分析（空数据结构校验、插入多科目/错误类型/知识点后统计正确、掌握/未掌握/待复习计数、分布列表 Top 10、30 天趋势序列长度和今日计数），结果为 `377 passed, 0 failed`。
 
 ## License
 

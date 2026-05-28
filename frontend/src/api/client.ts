@@ -65,6 +65,17 @@ export interface ErrorBookItem {
   created_at: string | null;
 }
 
+export interface ErrorStats {
+  total: number;
+  mastered: number;
+  unmastered: number;
+  due_today: number;
+  by_subject: { name: string; count: number }[];
+  by_error_type: { name: string; count: number }[];
+  by_knowledge_point: { name: string; count: number }[];
+  created_last_30_days: { date: string; count: number }[];
+}
+
 export interface StudyPlanItem {
   id: number;
   date: string;
@@ -172,6 +183,9 @@ export const updateError = (id: number, data: { mastered?: boolean; next_review_
 
 export const deleteError = (id: number): Promise<OkResponse> =>
   api.delete<OkResponse>(`/errors/${id}`).then(r => r.data);
+
+export const getErrorStats = (): Promise<ErrorStats> =>
+  api.get<ErrorStats>('/errors/stats').then(r => r.data);
 
 // ── Study Plan ──
 export const createPlan = (data: { date: string; subject: string; task: string }): Promise<StudyPlanItem> =>
