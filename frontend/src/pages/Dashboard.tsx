@@ -1,9 +1,12 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { getDashboard, getDashboardTrends, listPlans, updatePlan, getActiveSession, startSession, stopSession, getApiErrorMessage } from '../api/client';
-import type { DashboardStats, StudyPlanItem, TrendDay, StudySessionItem } from '../api/client';
+import { Treemap, ResponsiveContainer } from 'recharts';
+import { getDashboard, getDashboardTrends, getErrorStats, listPlans, updatePlan, getActiveSession, startSession, stopSession, getApiErrorMessage } from '../api/client';
+import type { DashboardStats, StudyPlanItem, TrendDay, StudySessionItem, ErrorStats } from '../api/client';
 import { formatLocalDate } from '../utils/date';
 import { useReviewTitle } from '../hooks/useDocumentTitle';
+
+const TREEMAP_COLORS = ['#3b82f6', '#ef4444', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'];
 
 export default function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -25,11 +28,15 @@ export default function Dashboard() {
   const [sessionError, setSessionError] = useState('');
   const [elapsed, setElapsed] = useState(0);
 
+  // Error stats for knowledge point analysis
+  const [errorStats, setErrorStats] = useState<ErrorStats | null>(null);
+
   const today = formatLocalDate();
 
   const refresh = useCallback(() => {
     getDashboard().then(setStats).catch(() => {});
     listPlans(today).then(setTodayPlans).catch(() => {});
+    getErrorStats().then(setErrorStats).catch(() => {});
   }, [today]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -358,6 +365,82 @@ export default function Dashboard() {
           );
         })()}
       </div>
+
+      {/* 知识点掌握热力图 + 薄弱环节分析 */}
+      {errorStats && errorStats.by_knowledge_point.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-6">
+          {/* 知识点 Treemap */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
+            <h2 className="text-lg font-semibold mb-3 dark:text-gray-100">知识点错题分布</h2>
+            <ResponsiveContainer width="100%" height={200}>
+              <Treemap
+                data={errorStats.by_knowledge_point}
+                dataKey="count"
+                nameKey="name"
+                stroke="none"
+                content={({ x, y, width, height, name, index }: { x: number; y: number; width: number; height: number; name: string; index: number }) => {
+                  if (width < 30 || height < 20) return <g />;
+                  return (
+                    <g>
+                      <rect x={x} y={y} width={width} height={height} fill={TREEMAP_COLORS[index % TREEMAP_COLORS.length]} rx={4} />
+                      {width > 50 && height > 30 && (
+                        <text x={x + width / 2} y={y + height / 2} textAnchor="middle" dominantBaseline="middle" fill="#fff" fontSize={width > 80 ? 12 : 10}>
+                          {name.length > 6 ? name.slice(0, 6) + '…' : name}
+                        </text>
+                      )}
+                    </g>
+                  );
+                }}
+              />
+            </ResponsiveContainer>
+            <div className="flex flex-wrap gap-2 mt-2">
+              {errorStats.by_knowledge_point.slice(0, 6).map((kp, i) => (
+                <span key={kp.name} className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
+                  <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: TREEMAP_COLORS[i % TREEMAP_COLORS.length] }} />
+                  {kp.name} ({kp.count})
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* 薄弱环节分析 */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
+            <h2 className="text-lg font-semibold mb-3 dark:text-gray-100">薄弱环节分析</h2>
+            <p className="text-xs text-gray-400 mb-3">根据错题数量自动识别需要重点复习的知识点</p>
+            <div className="space-y-3">
+              {errorStats.by_knowledge_point.slice(0, 3).map((kp, i) => {
+                const total = errorStats.total || 1;
+                const pct = Math.round((kp.count / total) * 100);
+                const severity = i === 0 ? 'text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400' :
+                  i === 1 ? 'text-orange-600 bg-orange-50 dark:bg-orange-900/20 dark:text-orange-400' :
+                  'text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20 dark:text-yellow-400';
+                const barColor = i === 0 ? 'bg-red-500' : i === 1 ? 'bg-orange-500' : 'bg-yellow-500';
+                return (
+                  <div key={kp.name} className={`rounded-lg p-3 ${severity}`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium">#{i + 1} {kp.name}</span>
+                      <span className="text-xs">{kp.count} 道错题 · 占比 {pct}%</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-black/10 rounded-full overflow-hidden">
+                      <div className={`h-full ${barColor} rounded-full`} style={{ width: `${Math.min(pct * 2, 100)}%` }} />
+                    </div>
+                    <p className="text-xs mt-1.5 opacity-75">
+                      {i === 0 ? '最高优先级：建议每天复习此知识点，重做错题并总结规律' :
+                       i === 1 ? '次高优先级：建议本周安排专项练习，巩固薄弱环节' :
+                       '需关注：建议结合资料库中的相关内容进行查漏补缺'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+            {errorStats.by_knowledge_point.length > 3 && (
+              <Link to="/errors" className="block mt-3 text-xs text-blue-500 hover:text-blue-700 text-center">
+                查看全部 {errorStats.by_knowledge_point.length} 个知识点 →
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
