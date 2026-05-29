@@ -198,32 +198,36 @@ async def search_chunks(session: AsyncSession, query: str, limit: int = 10) -> l
 
 
 async def _keyword_like_search(session: AsyncSession, keywords: list[str], limit: int) -> list[dict]:
-    """Search by multiple keywords with LIKE, merge and deduplicate results."""
-    seen_ids: set[int] = set()
-    results: list[dict] = []
+    """Search by multiple keywords with LIKE in a single query (OR conditions)."""
+    if not keywords:
+        return []
 
-    for kw in keywords:
-        if len(results) >= limit:
-            break
-        row = await session.execute(
-            text(
-                "SELECT id, material_id, content "
-                "FROM material_chunks WHERE content LIKE :q LIMIT :l"
-            ).bindparams(q=f"%{kw}%", l=limit)
-        )
-        for r in row.fetchall():
-            cid = r[0]
-            if cid in seen_ids:
-                continue
-            seen_ids.add(cid)
-            results.append({
-                "chunk_id": cid,
-                "material_id": r[1],
-                "snippet": _build_snippet(r[2], kw),
-                "content": r[2],
-            })
-            if len(results) >= limit:
+    # 构建 OR 条件
+    conditions = " OR ".join([f"content LIKE :q{i}" for i in range(len(keywords))])
+    params: dict = {f"q{i}": f"%{kw}%" for i, kw in enumerate(keywords)}
+    params["l"] = limit
+
+    row = await session.execute(
+        text(
+            f"SELECT id, material_id, content "
+            f"FROM material_chunks WHERE {conditions} LIMIT :l"
+        ).bindparams(**params)
+    )
+
+    results: list[dict] = []
+    for r in row.fetchall():
+        # 用第一个匹配的关键词构建 snippet
+        snippet = r[2]
+        for kw in keywords:
+            if kw in r[2]:
+                snippet = _build_snippet(r[2], kw)
                 break
+        results.append({
+            "chunk_id": r[0],
+            "material_id": r[1],
+            "snippet": snippet,
+            "content": r[2],
+        })
 
     return results
 
