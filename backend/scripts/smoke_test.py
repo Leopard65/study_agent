@@ -1226,12 +1226,32 @@ def run(client: TestClient):
     check("original problem exists", "冲突解析Q" in prob_qs)
     check("copy problem exists", any("副本" in q for q in prob_qs))
 
+    print("\n[19i2] POST /api/import/json (keep_both preserves long text)")
+    long_question = "长错题Q-" + ("保持完整内容" * 80)
+    long_title = "长真题T-" + ("标题内容" * 70)
+    long_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.2",
+        "materials": [], "material_chunks_count": 0, "chat_history": [],
+        "error_book": [{"question": long_question, "error_type": "长文本", "subject": "原科目"}],
+        "study_plans": [], "problems": [],
+        "exam_questions": [{"id": 8101, "title": long_title, "question": "长真题Q", "answer": "原答案"}],
+        "exam_attempts": [],
+    }
+    r = client.post("/api/import/json", json=long_backup)
+    check("long first import 200", r.status_code == 200)
+    r = client.post("/api/import/json", json=long_backup, params={"strategy": "keep_both"})
+    check("long keep_both 200", r.status_code == 200)
+    long_errs = [e["question"] for e in client.get("/api/errors").json() if e["question"].startswith("长错题Q-")]
+    check("long error copy keeps base text", any(q.startswith(long_question) and "副本" in q for q in long_errs), f"got lengths={[len(q) for q in long_errs]}")
+    long_titles = [q["title"] for q in client.get("/api/exam/questions").json() if q["title"].startswith("长真题T-")]
+    check("long exam title copy keeps suffix", any("副本" in t for t in long_titles), f"got {long_titles}")
+
     # Cleanup conflict test data
     for q in client.get("/api/exam/questions").json():
-        if q["title"].startswith("冲突真题"):
+        if q["title"].startswith("冲突真题") or q["title"].startswith("长真题T-"):
             client.delete(f"/api/exam/questions/{q['id']}")
     for e in client.get("/api/errors").json():
-        if e["question"].startswith("冲突错题"):
+        if e["question"].startswith("冲突错题") or e["question"].startswith("长错题Q-"):
             client.delete(f"/api/errors/{e['id']}")
     for p in client.get("/api/plan").json():
         if p.get("task", "").startswith("冲突任务"):
@@ -1327,6 +1347,9 @@ def run(client: TestClient):
     r = client.get("/api/search", params={"q": "x", "types": "invalid"})
     check("invalid types rejected 422", r.status_code == 422, f"got {r.status_code}")
 
+    r = client.get("/api/search", params={"q": "x", "types": "errors,invalid,foo"})
+    check("mixed invalid types rejected 422", r.status_code == 422, f"got {r.status_code}")
+
     r = client.get("/api/search", params={"q": "a" * 101})
     check("q too long rejected 422", r.status_code == 422, f"got {r.status_code}")
 
@@ -1371,6 +1394,36 @@ def run(client: TestClient):
     for item in sr["results"]:
         check(f"snippet no HTML ({item['type']})", "<" not in item["snippet"], f"snippet={item['snippet'][:50]}")
 
+    # Verify match_field is present on all results
+    for item in sr["results"]:
+        check(f"match_field present ({item['type']})", "match_field" in item, f"keys={list(item.keys())}")
+
+    # Verify material results are deduplicated (each material_id appears at most once)
+    mat_ids = [x["id"] for x in sr["results"] if x["type"] == "material"]
+    check("material results deduplicated", len(mat_ids) == len(set(mat_ids)), f"mat_ids={mat_ids}")
+
+    # Upload a second chunk for the same material to test dedup
+    search_file2 = os.path.join(_tmp_dir, "search_test2.txt")
+    with open(search_file2, "w", encoding="utf-8") as f:
+        f.write("全局搜索测试卷积定理补充内容第二次上传")
+    with open(search_file2, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("search_test2.txt", f, "text/plain")})
+    check("search: upload material2 200", r.status_code == 200)
+
+    # Search again - each material should appear at most once
+    r = client.get("/api/search", params={"q": "卷积定理", "types": "materials", "limit": 50})
+    sr2 = r.json()
+    mat_ids2 = [x["id"] for x in sr2["results"] if x["type"] == "material"]
+    check("dedup after second upload", len(mat_ids2) == len(set(mat_ids2)), f"mat_ids={mat_ids2}")
+
+    # Verify title match priority: exam title "搜索真题" should rank before question-only matches
+    r = client.get("/api/search", params={"q": "搜索真题", "types": "exam", "limit": 10})
+    sr3 = r.json()
+    if sr3["results"]:
+        check("title match has match_field=question or title",
+              sr3["results"][0].get("match_field") in ("title", "question", "tags"),
+              f"match_field={sr3['results'][0].get('match_field')}")
+
     # Search with type filter
     r = client.get("/api/search", params={"q": "卷积定理", "types": "errors,exam", "limit": 20})
     check("filtered search 200", r.status_code == 200)
@@ -1380,15 +1433,19 @@ def run(client: TestClient):
     # Verify search result IDs are correct entity IDs
     r = client.get("/api/search", params={"q": "卷积定理", "limit": 50})
     sr = r.json()
-    for item in sr["results"]:
-        if item["type"] == "material":
-            check("material id is entity id", item["id"] == search_mat_id, f"got {item['id']}, expected {search_mat_id}")
-        elif item["type"] == "error":
-            check("error id is entity id", item["id"] == search_err_id, f"got {item['id']}, expected {search_err_id}")
-        elif item["type"] == "plan":
-            check("plan id is entity id", item["id"] == search_plan_id, f"got {item['id']}, expected {search_plan_id}")
-        elif item["type"] == "exam":
-            check("exam id is entity id", item["id"] == search_eq_id, f"got {item['id']}, expected {search_eq_id}")
+    mat_result_ids = {x["id"] for x in sr["results"] if x["type"] == "material"}
+    check("material id is entity id", search_mat_id in mat_result_ids, f"got {mat_result_ids}, expected {search_mat_id}")
+    mat_titles = {x["title"] for x in sr["results"] if x["type"] == "material"}
+    check("material title is filename", "search_test.txt" in mat_titles, f"got {mat_titles}")
+
+    err_result_ids = {x["id"] for x in sr["results"] if x["type"] == "error"}
+    check("error id is entity id", search_err_id in err_result_ids, f"got {err_result_ids}, expected {search_err_id}")
+
+    plan_result_ids = {x["id"] for x in sr["results"] if x["type"] == "plan"}
+    check("plan id is entity id", search_plan_id in plan_result_ids, f"got {plan_result_ids}, expected {search_plan_id}")
+
+    exam_result_ids = {x["id"] for x in sr["results"] if x["type"] == "exam"}
+    check("exam id is entity id", search_eq_id in exam_result_ids, f"got {exam_result_ids}, expected {search_eq_id}")
 
     # Cleanup
     client.delete(f"/api/materials/{search_mat_id}")

@@ -386,6 +386,7 @@ export interface SearchResult {
   title: string;
   snippet: string;
   created_at: string | null;
+  match_field?: string;
 }
 
 export interface SearchResponse {
