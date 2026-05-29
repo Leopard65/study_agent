@@ -1,0 +1,19 @@
+{
+  "name": "考研学习助手",
+  "short_name": "考研助手",
+  "description": "AI 驱动的考研长期陪跑学习助手",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f9fafb",
+  "theme_color": "#2563eb",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["education", "productivity"]
+}

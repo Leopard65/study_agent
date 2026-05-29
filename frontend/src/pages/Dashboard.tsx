@@ -5,6 +5,7 @@ import { getDashboard, getDashboardTrends, getErrorStats, listPlans, updatePlan,
 import type { DashboardStats, StudyPlanItem, TrendDay, StudySessionItem, ErrorStats } from '../api/client';
 import { formatLocalDate } from '../utils/date';
 import { useReviewTitle } from '../hooks/useDocumentTitle';
+import { requestNotificationPermission, sendReviewNotification } from '../utils/pwa';
 
 const TREEMAP_COLORS = ['#3b82f6', '#ef4444', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'];
 
@@ -136,6 +137,17 @@ export default function Dashboard() {
   };
 
   useReviewTitle(stats?.today_review_errors ?? 0);
+
+  // 有待复习错题时请求通知权限并发送提醒
+  useEffect(() => {
+    const due = stats?.today_review_errors ?? 0;
+    if (due > 0 && 'Notification' in window && Notification.permission === 'default') {
+      requestNotificationPermission();
+    }
+    if (due > 0 && Notification.permission === 'granted') {
+      sendReviewNotification(due);
+    }
+  }, [stats?.today_review_errors]);
 
   if (!stats) return <div className="p-6 text-gray-400">加载中...</div>;
 

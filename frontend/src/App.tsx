@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { PreferencesProvider } from './hooks/usePreferences';
 import Sidebar from './components/Sidebar';
 import CommandPalette from './components/CommandPalette';
+import InstallBanner from './components/InstallBanner';
 import { exportJson } from './api/client';
 import { downloadBlob } from './utils/constants';
 
@@ -80,6 +81,7 @@ function AppInner() {
         </Suspense>
       </main>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onExport={handleExport} />
+      <InstallBanner />
     </div>
   );
 }
