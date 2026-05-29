@@ -117,8 +117,8 @@ def split_into_chunks(content: str, chunk_size: int = 1000, overlap: int = 100) 
 
 
 def _build_snippet(content: str, query: str, context_chars: int = 60) -> str:
-    # Try each keyword to find best snippet
-    for kw in (query if isinstance(query, list) else [query]):
+    # Try to find best snippet around the query keyword
+    for kw in [query]:
         idx = content.find(kw)
         if idx == -1:
             idx = content.lower().find(kw.lower())

@@ -29,9 +29,13 @@ function AppInner() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const handleExport = useCallback(async () => {
-    const blob = await exportJson();
-    const date = new Date().toISOString().slice(0, 10);
-    downloadBlob(blob, `math_agent_backup_${date}.json`);
+    try {
+      const blob = await exportJson();
+      const date = new Date().toISOString().slice(0, 10);
+      downloadBlob(blob, `math_agent_backup_${date}.json`);
+    } catch {
+      // Sidebar 会显示导出错误，这里静默处理
+    }
   }, []);
 
   useEffect(() => {

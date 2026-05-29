@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Treemap, ResponsiveContainer } from 'recharts';
+import MiniBarChart from '../components/MiniBarChart';
 import { getDashboard, getDashboardTrends, getErrorStats, listPlans, updatePlan, getActiveSession, startSession, stopSession, getApiErrorMessage } from '../api/client';
 import type { DashboardStats, StudyPlanItem, TrendDay, StudySessionItem, ErrorStats } from '../api/client';
 import { formatLocalDate } from '../utils/date';
@@ -138,14 +139,15 @@ export default function Dashboard() {
 
   useReviewTitle(stats?.today_review_errors ?? 0);
 
-  // 有待复习错题时请求通知权限并发送提醒
+  // 有待复习错题时请求通知权限并发送提醒（每次会话只通知一次）
   useEffect(() => {
     const due = stats?.today_review_errors ?? 0;
     if (due > 0 && 'Notification' in window && Notification.permission === 'default') {
       requestNotificationPermission();
     }
-    if (due > 0 && Notification.permission === 'granted') {
+    if (due > 0 && Notification.permission === 'granted' && !sessionStorage.getItem('review_notified')) {
       sendReviewNotification(due);
+      sessionStorage.setItem('review_notified', '1');
     }
   }, [stats?.today_review_errors]);
 
@@ -273,105 +275,61 @@ export default function Dashboard() {
         ) : trends.length === 0 ? (
           <p className="text-gray-400 text-sm">暂无数据</p>
         ) : (() => {
+          const dates = trends.map(t => t.date);
           const maxPlans = Math.max(...trends.map(x => x.plans_total), 1);
           const maxExam = Math.max(...trends.map(x => x.exam_attempts), 1);
           const maxStudy = Math.max(...trends.map(x => x.study_minutes), 1);
           const maxErrors = Math.max(...trends.map(x => x.errors_created + x.errors_review_due), 1);
           return (
           <div className="space-y-4">
-            {/* Plans chart */}
             <div>
               <div className="text-xs text-gray-500 mb-1.5">计划完成</div>
-              <div className="flex items-end gap-1" style={{ height: 60 }}>
-                {trends.map(t => {
-                  const h = t.plans_total > 0 ? (t.plans_total / maxPlans) * 100 : 0;
-                  const doneH = t.plans_total > 0 ? (t.plans_completed / t.plans_total) * 100 : 0;
-                  return (
-                    <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: ${t.plans_completed}/${t.plans_total}`}>
-                      <div className="w-full flex flex-col justify-end" style={{ height: 50 }}>
-                        <div className="w-full rounded-t" style={{ height: `${h}%`, background: '#e5e7eb' }}>
-                          <div className="w-full rounded-t" style={{ height: `${doneH}%`, background: '#3b82f6' }} />
-                        </div>
-                      </div>
-                      <div className="text-[9px] text-gray-400 mt-0.5">{t.date.slice(5)}</div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex gap-3 mt-1 text-[10px] text-gray-400">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-sm inline-block" />已完成</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-gray-200 rounded-sm inline-block" />未完成</span>
-              </div>
+              <MiniBarChart
+                dates={dates}
+                max={maxPlans}
+                bars={trends.map(t => [
+                  { value: t.plans_total, color: '#e5e7eb' },
+                  { value: t.plans_completed, color: '#3b82f6' },
+                ])}
+                tooltips={trends.map(t => `${t.date}: ${t.plans_completed}/${t.plans_total}`)}
+                legends={[{ label: '已完成', color: '#3b82f6' }, { label: '未完成', color: '#e5e7eb' }]}
+              />
             </div>
-
-            {/* Exam chart */}
             <div>
               <div className="text-xs text-gray-500 mb-1.5">真题练习</div>
-              <div className="flex items-end gap-1" style={{ height: 60 }}>
-                {trends.map(t => {
-                  const h = t.exam_attempts > 0 ? (t.exam_attempts / maxExam) * 100 : 0;
-                  const correctH = t.exam_attempts > 0 ? (t.exam_correct / t.exam_attempts) * 100 : 0;
-                  return (
-                    <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: ${t.exam_correct}/${t.exam_attempts}`}>
-                      <div className="w-full flex flex-col justify-end" style={{ height: 50 }}>
-                        <div className="w-full rounded-t" style={{ height: `${h}%`, background: '#e5e7eb' }}>
-                          <div className="w-full rounded-t" style={{ height: `${correctH}%`, background: '#10b981' }} />
-                        </div>
-                      </div>
-                      <div className="text-[9px] text-gray-400 mt-0.5">{t.date.slice(5)}</div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex gap-3 mt-1 text-[10px] text-gray-400">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-500 rounded-sm inline-block" />正确</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-gray-200 rounded-sm inline-block" />总计</span>
-              </div>
+              <MiniBarChart
+                dates={dates}
+                max={maxExam}
+                bars={trends.map(t => [
+                  { value: t.exam_attempts, color: '#e5e7eb' },
+                  { value: t.exam_correct, color: '#10b981' },
+                ])}
+                tooltips={trends.map(t => `${t.date}: ${t.exam_correct}/${t.exam_attempts}`)}
+                legends={[{ label: '正确', color: '#10b981' }, { label: '总计', color: '#e5e7eb' }]}
+              />
             </div>
-
-            {/* Study minutes chart */}
             <div>
               <div className="text-xs text-gray-500 mb-1.5">学习时长（分钟）</div>
-              <div className="flex items-end gap-1" style={{ height: 60 }}>
-                {trends.map(t => {
-                  const h = t.study_minutes > 0 ? (t.study_minutes / maxStudy) * 100 : 0;
-                  return (
-                    <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: ${t.study_minutes} 分钟`}>
-                      <div className="w-full flex flex-col justify-end" style={{ height: 50 }}>
-                        <div className="w-full rounded-t" style={{ height: `${h}%`, background: '#6366f1' }} />
-                      </div>
-                      <div className="text-[9px] text-gray-400 mt-0.5">{t.date.slice(5)}</div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex gap-3 mt-1 text-[10px] text-gray-400">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-indigo-500 rounded-sm inline-block" />学习分钟</span>
-              </div>
+              <MiniBarChart
+                dates={dates}
+                max={maxStudy}
+                bars={trends.map(t => [{ value: t.study_minutes, color: '#6366f1' }])}
+                tooltips={trends.map(t => `${t.date}: ${t.study_minutes} 分钟`)}
+                legends={[{ label: '学习分钟', color: '#6366f1' }]}
+              />
             </div>
-
-            {/* Errors chart */}
             <div>
               <div className="text-xs text-gray-500 mb-1.5">错题动态</div>
-              <div className="flex items-end gap-1" style={{ height: 60 }}>
-                {trends.map(t => {
-                  const createdH = t.errors_created > 0 ? (t.errors_created / maxErrors) * 100 : 0;
-                  const dueH = t.errors_review_due > 0 ? (t.errors_review_due / maxErrors) * 100 : 0;
-                  return (
-                    <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: 新增${t.errors_created}, 待复习${t.errors_review_due}`}>
-                      <div className="w-full flex flex-col justify-end" style={{ height: 50 }}>
-                        <div style={{ height: `${dueH}%`, background: '#f97316' }} />
-                        <div style={{ height: `${createdH}%`, background: '#ef4444' }} />
-                      </div>
-                      <div className="text-[9px] text-gray-400 mt-0.5">{t.date.slice(5)}</div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex gap-3 mt-1 text-[10px] text-gray-400">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-sm inline-block" />新增</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-orange-500 rounded-sm inline-block" />待复习</span>
-              </div>
+              <MiniBarChart
+                dates={dates}
+                max={maxErrors}
+                bars={trends.map(t => [
+                  { value: t.errors_created, color: '#ef4444' },
+                  { value: t.errors_review_due, color: '#f97316' },
+                ])}
+                tooltips={trends.map(t => `${t.date}: 新增${t.errors_created}, 待复习${t.errors_review_due}`)}
+                legends={[{ label: '新增', color: '#ef4444' }, { label: '待复习', color: '#f97316' }]}
+              />
             </div>
           </div>
           );

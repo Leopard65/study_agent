@@ -100,14 +100,6 @@ export interface PlanGenerateResponse {
   parse_error?: string;
 }
 
-export interface ProblemItem {
-  id: number;
-  question: string;
-  solution: string;
-  subject: string;
-  created_at: string | null;
-}
-
 export interface OkResponse { ok: boolean }
 
 export interface HealthStatus {
@@ -172,9 +164,6 @@ export const exportSelectedMaterials = (ids: number[], includePreview = true): P
 // ── Problems ──
 export const solveProblem = (question: string, subject?: string): Promise<{ solution: string }> =>
   api.post<{ solution: string }>('/problems/solve', { question, subject }).then(r => r.data);
-
-export const getProblemHistory = (): Promise<ProblemItem[]> =>
-  api.get<ProblemItem[]>('/problems/history').then(r => r.data);
 
 // ── Error Book ──
 export const createError = (data: {
@@ -291,9 +280,6 @@ export interface ExamGenerateResponse {
 export const listExamQuestions = (params?: { subject?: string; year?: string; tag?: string }): Promise<ExamQuestionItem[]> =>
   api.get<ExamQuestionItem[]>('/exam/questions', { params: params || {} }).then(r => r.data);
 
-export const getExamQuestion = (id: number): Promise<ExamQuestionItem> =>
-  api.get<ExamQuestionItem>(`/exam/questions/${id}`).then(r => r.data);
-
 export const createExamQuestion = (data: {
   title: string;
   subject?: string;
@@ -392,9 +378,6 @@ export const startSession = (data?: { subject?: string; note?: string }): Promis
 
 export const stopSession = (id: number): Promise<StudySessionItem> =>
   api.post<StudySessionItem>(`/sessions/${id}/stop`).then(r => r.data);
-
-export const listSessions = (limit?: number): Promise<StudySessionItem[]> =>
-  api.get<StudySessionItem[]>('/sessions', { params: { limit: limit || 20 } }).then(r => r.data);
 
 // ── Global Search ──
 export interface SearchResult {

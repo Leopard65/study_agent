@@ -3,7 +3,8 @@ import { useSearchParams } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, CartesianGrid } from 'recharts';
 import { listErrors, createError, updateError, deleteError, getReviewSettings, updateReviewSettings, getErrorStats, getApiErrorMessage } from '../api/client';
 import type { ErrorBookItem, ErrorStats } from '../api/client';
-import LatexRenderer from '../components/LatexRenderer';
+import ErrorAddForm from '../components/ErrorAddForm';
+import ErrorListItem from '../components/ErrorListItem';
 import { formatLocalDate } from '../utils/date';
 import { usePreferences } from '../hooks/usePreferences';
 import { useSafeAsync } from '../hooks/useSafeAsync';
@@ -439,29 +440,7 @@ export default function ErrorBook() {
       </div>
 
       {showAdd && (
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 mb-6">
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="科目" value={form.subject} onChange={e => set('subject', e.target.value)} />
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="章节" value={form.chapter} onChange={e => set('chapter', e.target.value)} />
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="知识点" value={form.knowledge_point} onChange={e => set('knowledge_point', e.target.value)} />
-          </div>
-          <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none mb-3 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="题目内容" value={form.question} onChange={e => set('question', e.target.value)} />
-          <div className="grid grid-cols-2 gap-3 mb-3">
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="你的错误答案" value={form.user_answer} onChange={e => set('user_answer', e.target.value)} />
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="正确答案/解析" value={form.correct_answer} onChange={e => set('correct_answer', e.target.value)} />
-          </div>
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="错误类型（如计算错误）" value={form.error_type} onChange={e => set('error_type', e.target.value)} />
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="标签（逗号分隔）" value={form.tags} onChange={e => set('tags', e.target.value)} />
-            <input type="date" className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" title="下次复习时间" value={form.next_review_date} onChange={e => set('next_review_date', e.target.value)} />
-          </div>
-          <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none mb-3 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="错误原因" value={form.error_reason} onChange={e => set('error_reason', e.target.value)} />
-          <div className="grid grid-cols-2 gap-3 mb-3">
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="正确思路" value={form.correct_approach} onChange={e => set('correct_approach', e.target.value)} />
-            <textarea className="border rounded-lg px-3 py-2 text-sm h-16 resize-none dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="复习建议" value={form.review_suggestion} onChange={e => set('review_suggestion', e.target.value)} />
-          </div>
-          <button onClick={handleAdd} disabled={adding} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm">{adding ? '保存中...' : '保存'}</button>
-        </div>
+        <ErrorAddForm form={form} onChange={set} onSave={handleAdd} saving={adding} />
       )}
 
       {errors.length === 0 ? (
@@ -470,49 +449,19 @@ export default function ErrorBook() {
         </p>
       ) : (
         <div className="space-y-3">
-          {errors.map(item => {
-            const rowBusy = updatingId === item.id || deletingId === item.id;
-            return (
-            <div key={item.id} className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${rowBusy ? 'opacity-50' : ''} ${item.mastered && !rowBusy ? 'opacity-60' : ''} ${highlightId === item.id ? 'ring-2 ring-blue-400' : ''}`}>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  {item.subject && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{item.subject}</span>}
-                  {item.chapter && <span className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">{item.chapter}</span>}
-                  {item.knowledge_point && <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded text-xs">{item.knowledge_point}</span>}
-                  {item.error_type && <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs">{item.error_type}</span>}
-                  {item.tags && item.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
-                    <span key={tag} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-600 text-gray-500 dark:text-gray-300 rounded text-xs">{tag}</span>
-                  ))}
-                  <span className="px-2 py-0.5 bg-teal-100 text-teal-700 rounded text-xs">复习 {item.review_count} 次</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {item.next_review_date && <span className="text-xs text-gray-400">复习: {item.next_review_date}</span>}
-                  <button onClick={() => toggleMastered(item)} disabled={rowBusy} className={`text-xs px-2 py-1 rounded ${item.mastered ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                    {item.mastered ? '已掌握' : '标记掌握'}
-                  </button>
-                  <button onClick={() => setExpandedId(expandedId === item.id ? null : item.id)} className="text-blue-400 hover:text-blue-600 text-xs">
-                    {expandedId === item.id ? '收起' : '展开'}
-                  </button>
-                  <button onClick={() => handleDelete(item.id)} disabled={rowBusy} className="text-red-400 hover:text-red-600 disabled:opacity-50 text-xs">{deletingId === item.id ? '删除中...' : '删除'}</button>
-                </div>
-              </div>
-
-              <div className="prose prose-sm max-w-none mb-2">
-                <LatexRenderer content={item.question} />
-              </div>
-
-              {expandedId === item.id && (
-                <div className="mt-3 pt-3 border-t space-y-2 text-sm">
-                  {item.user_answer && <div><span className="font-medium text-red-600">错误答案：</span><div className="prose prose-sm max-w-none dark:text-gray-100"><LatexRenderer content={item.user_answer} /></div></div>}
-                  {item.correct_answer && <div><span className="font-medium text-green-600">正确答案：</span><div className="prose prose-sm max-w-none dark:text-gray-100"><LatexRenderer content={item.correct_answer} /></div></div>}
-                  {item.error_reason && <div><span className="font-medium text-gray-600">错误原因：</span>{item.error_reason}</div>}
-                  {item.correct_approach && <div><span className="font-medium text-blue-600">正确思路：</span>{item.correct_approach}</div>}
-                  {item.review_suggestion && <div><span className="font-medium text-purple-600">复习建议：</span>{item.review_suggestion}</div>}
-                </div>
-              )}
-            </div>
-            );
-          })}
+          {errors.map(item => (
+            <ErrorListItem
+              key={item.id}
+              item={item}
+              expanded={expandedId === item.id}
+              highlighted={highlightId === item.id}
+              busy={updatingId === item.id || deletingId === item.id}
+              deleting={deletingId === item.id}
+              onToggleMastered={() => toggleMastered(item)}
+              onToggleExpand={() => setExpandedId(expandedId === item.id ? null : item.id)}
+              onDelete={() => handleDelete(item.id)}
+            />
+          ))}
         </div>
       )}
     </div>

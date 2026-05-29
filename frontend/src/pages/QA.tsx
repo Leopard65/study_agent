@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { chat, listConversations, deleteConversation, getApiErrorMessage } from '../api/client';
+import { chat, getChatHistory, listConversations, deleteConversation, getApiErrorMessage } from '../api/client';
 import type { ChatSource, ConversationItem } from '../api/client';
 import ChatMessage from '../components/ChatMessage';
 
@@ -56,18 +56,14 @@ export default function QA() {
 
   const handleSelectConversation = (convId: string) => {
     setConversationId(convId);
-    // 从对话列表的标题推断消息（实际应从 history 加载）
-    // 简单方案：清空并重新从 history 加载
-    import('../api/client').then(({ getChatHistory }) => {
-      getChatHistory(convId).then(history => {
-        const loaded: Message[] = [];
-        for (const h of history.reverse()) {
-          loaded.push({ role: 'user', content: h.question });
-          loaded.push({ role: 'assistant', content: h.answer });
-        }
-        setMessages(loaded);
-      }).catch(() => {});
-    });
+    getChatHistory(convId).then(history => {
+      const loaded: Message[] = [];
+      for (const h of history.reverse()) {
+        loaded.push({ role: 'user', content: h.question });
+        loaded.push({ role: 'assistant', content: h.answer });
+      }
+      setMessages(loaded);
+    }).catch(() => {});
     setShowSidebar(false);
   };
 

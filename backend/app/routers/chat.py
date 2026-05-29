@@ -53,17 +53,16 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
     # 加载最近对话历史作为上下文
     history_messages: list[dict[str, str]] = []
-    if conversation_id:
-        hist_q = await db.execute(
-            select(ChatHistory.question, ChatHistory.answer)
-            .where(ChatHistory.conversation_id == conversation_id)
-            .order_by(ChatHistory.id.desc())
-            .limit(_CONTEXT_HISTORY_COUNT)
-        )
-        history_rows = hist_q.fetchall()
-        for q, a in reversed(history_rows):
-            history_messages.append({"role": "user", "content": q})
-            history_messages.append({"role": "assistant", "content": a})
+    hist_q = await db.execute(
+        select(ChatHistory.question, ChatHistory.answer)
+        .where(ChatHistory.conversation_id == conversation_id)
+        .order_by(ChatHistory.id.desc())
+        .limit(_CONTEXT_HISTORY_COUNT)
+    )
+    history_rows = hist_q.fetchall()
+    for q, a in reversed(history_rows):
+        history_messages.append({"role": "user", "content": q})
+        history_messages.append({"role": "assistant", "content": a})
 
     try:
         answer = await llm.chat(req.question, context, history_messages)
