@@ -166,6 +166,9 @@ math_agent/
     │   ├── App.tsx
     │   ├── main.tsx
     │   └── index.css
+    ├── e2e/
+    │   └── smoke.spec.ts         # Playwright 前端端到端冒烟测试
+    ├── playwright.config.ts      # E2E 测试配置（自动启动前后端隔离环境）
     ├── vite.config.ts
     └── package.json
 ```
@@ -421,9 +424,15 @@ cd backend
 cd ../frontend
 npm run lint
 npm run build
+
+# 首次运行 Playwright 前需要安装浏览器
+npx playwright install chromium
+npm run e2e
 ```
 
-截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏（使用统一时区 helper）、工作台统计（含 today_review_errors 时区一致性、未来日期不计入复习数）、输入校验（空值/格式/范围 422，含 chat 和 plan/generate 边界值及纯空白科目拒绝）、搜索片段安全、真题练习 CRUD（创建/列表/筛选/详情/提交答案/加入错题本/删除级联）、真题输入校验（空标题/空题目/错误年份格式/不存在 ID 404）、真题加入错题本去重（重复添加返回 409）、AI 生成练习题草稿（count 越界/空 topic 422、无 API key 503、JSON 解析失败返回 parse_error、mock 成功不写入数据库）、数据导出 JSON（endpoint 200、关键字段存在、materials 不含完整 content、exam_attempts 结构完整、数据条数一致）、复习策略配置（默认值、PUT 校验、非递增/空/越界 422、自定义间隔影响错题复习日期、超出长度使用最后间隔）、数据导入恢复（预检不写 DB、导入后数量增加、二次导入跳过重复、exam_attempts question_id 映射、缺少字段 422、materials 不导入 content）、学习趋势洞察（days=7/30、非法 days 422、插入测试数据后统计正确）、全局搜索（空 q/limit 越界 422、类型过滤、插入各类数据后搜到对应类型、snippet 不含 HTML、搜索结果 ID 为实体 ID 非 chunk ID）、学习会话/专注计时（start/stop/active/list、重复 start 409、double stop 409、duration_minutes 计算、dashboard today_study_minutes、trends study_minutes）、错题统计分析（空数据结构校验、插入多科目/错误类型/知识点后统计正确、掌握/未掌握/待复习计数、分布列表 Top 10、30 天趋势序列长度和今日计数）、资料库批量操作（bulk-delete 空/超限 422、批量删除多资料后 DB/chunks/files 清理、missing 计数正确、export-selected 返回正确字段不含 stored file、include_preview 行为正确），结果为 `404 passed, 0 failed`。
+截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏（使用统一时区 helper）、工作台统计（含 today_review_errors 时区一致性、未来日期不计入复习数）、输入校验（空值/格式/范围 422，含 chat 和 plan/generate 边界值及纯空白科目拒绝）、搜索片段安全、真题练习 CRUD（创建/列表/筛选/详情/提交答案/加入错题本/删除级联）、真题输入校验（空标题/空题目/错误年份格式/不存在 ID 404）、真题加入错题本去重（重复添加返回 409）、AI 生成练习题草稿（count 越界/空 topic 422、无 API key 503、JSON 解析失败返回 parse_error、mock 成功不写入数据库）、数据导出 JSON（endpoint 200、关键字段存在、materials 不含完整 content、exam_attempts 结构完整、数据条数一致）、复习策略配置（默认值、PUT 校验、非递增/空/越界 422、自定义间隔影响错题复习日期、超出长度使用最后间隔）、数据导入恢复（预检不写 DB、导入后数量增加、二次导入跳过重复、exam_attempts question_id 映射、缺少字段 422、materials 不导入 content、冲突策略 skip/overwrite/keep_both、非法策略 422、覆盖后字段更新验证、保留两份自动重命名、冲突预览检测含每模块新增/冲突/预测数量和样例、预览与实际导入结果一致验证、快速切换策略后返回正确结果、预览接口无副作用不改变数据库）、学习趋势洞察（days=7/30、非法 days 422、插入测试数据后统计正确）、全局搜索（空 q/limit 越界 422、类型过滤、插入各类数据后搜到对应类型、snippet 不含 HTML、搜索结果 ID 为实体 ID 非 chunk ID）、学习会话/专注计时（start/stop/active/list、重复 start 409、double stop 409、duration_minutes 计算、dashboard today_study_minutes、trends study_minutes）、错题统计分析（空数据结构校验、插入多科目/错误类型/知识点后统计正确、掌握/未掌握/待复习计数、分布列表 Top 10、30 天趋势序列长度和今日计数）、资料库批量操作（bulk-delete 空/超限 422、批量删除多资料后 DB/chunks/files 清理、missing 计数正确、export-selected 返回正确字段不含 stored file、include_preview 行为正确），结果为 `496 passed, 0 failed`。
+
+Playwright 端到端冒烟测试覆盖主路由加载、命令面板导航、深色主题与侧栏折叠偏好持久化、移动端侧栏抽屉、资料上传/搜索/预览/删除。E2E 会自动启动隔离端口的后端和前端，并使用 `backend/data/e2e.db` 与 `backend/uploads/e2e`，不污染本地默认数据。
 
 ## License
 

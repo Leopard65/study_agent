@@ -23,7 +23,7 @@ def _serialize(s: StudySession) -> dict:
 
 @router.get("/active")
 async def get_active(db: AsyncSession = Depends(get_db)):
-    stmt = select(StudySession).where(StudySession.ended_at == None).order_by(StudySession.id.desc()).limit(1)
+    stmt = select(StudySession).where(StudySession.ended_at.is_(None)).order_by(StudySession.id.desc()).limit(1)
     r = await db.execute(stmt)
     session = r.scalars().first()
     return _serialize(session) if session else None
@@ -32,7 +32,7 @@ async def get_active(db: AsyncSession = Depends(get_db)):
 @router.post("/start")
 async def start_session(body: StudySessionStartRequest = StudySessionStartRequest(), db: AsyncSession = Depends(get_db)):
     # Check for existing active session
-    stmt = select(StudySession).where(StudySession.ended_at == None).order_by(StudySession.id.desc()).limit(1)
+    stmt = select(StudySession).where(StudySession.ended_at.is_(None)).order_by(StudySession.id.desc()).limit(1)
     r = await db.execute(stmt)
     existing = r.scalars().first()
     if existing:

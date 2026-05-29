@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import text
 from app.config import get_settings
 
 settings = get_settings()
@@ -22,40 +23,18 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         # Create FTS5 virtual table for chunk-based search
         await conn.execute(
-            __import__("sqlalchemy").text(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(content, chunk_id UNINDEXED, material_id UNINDEXED)"
-            )
+            text("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(content, chunk_id UNINDEXED, material_id UNINDEXED)")
         )
         # Lightweight migration: add stored_filename to materials if missing
-        result = await conn.execute(
-            __import__("sqlalchemy").text("PRAGMA table_info(materials)")
-        )
+        result = await conn.execute(text("PRAGMA table_info(materials)"))
         columns = [row[1] for row in result.fetchall()]
         if "stored_filename" not in columns:
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "ALTER TABLE materials ADD COLUMN stored_filename VARCHAR(500) DEFAULT ''"
-                )
-            )
+            await conn.execute(text("ALTER TABLE materials ADD COLUMN stored_filename VARCHAR(500) DEFAULT ''"))
         # Fix NULL values from old data (idempotent)
-        await conn.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE materials SET stored_filename = '' WHERE stored_filename IS NULL"
-            )
-        )
+        await conn.execute(text("UPDATE materials SET stored_filename = '' WHERE stored_filename IS NULL"))
         # Lightweight migration: add review_count to error_book if missing
-        result = await conn.execute(
-            __import__("sqlalchemy").text("PRAGMA table_info(error_book)")
-        )
+        result = await conn.execute(text("PRAGMA table_info(error_book)"))
         columns = [row[1] for row in result.fetchall()]
         if "review_count" not in columns:
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "ALTER TABLE error_book ADD COLUMN review_count INTEGER DEFAULT 0"
-                )
-            )
-        await conn.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE error_book SET review_count = 0 WHERE review_count IS NULL"
-            )
-        )
+            await conn.execute(text("ALTER TABLE error_book ADD COLUMN review_count INTEGER DEFAULT 0"))
+        await conn.execute(text("UPDATE error_book SET review_count = 0 WHERE review_count IS NULL"))

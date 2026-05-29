@@ -305,3 +305,9 @@ class DashboardStats(BaseModel):
 class StudySessionStartRequest(BaseModel):
     subject: str = Field(default="", max_length=100)
     note: str = Field(default="", max_length=500)
+
+
+# ── Import ──
+class ImportRequest(BaseModel):
+    data: dict
+    strategy: str = Field(default="skip", pattern=r"^(skip|overwrite|keep_both)$")

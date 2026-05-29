@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, getApiErrorMessage } from '../api/client';
 import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
+import { useSafeAsync } from '../hooks/useSafeAsync';
+import { useDeepLink } from '../hooks/useDeepLink';
 
 function HighlightedSnippet({ text }: { text: string }): ReactNode {
   const parts: ReactNode[] = [];
@@ -34,7 +35,7 @@ function fetchFirstMaterials(): Promise<MaterialItem[]> {
 }
 
 export default function Materials() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const { run, cancel } = useSafeAsync();
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<MaterialSearchResult[]>([]);
@@ -48,7 +49,6 @@ export default function Materials() {
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialDetail | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState<number | null>(null);
   const [detailError, setDetailError] = useState('');
-  const effectSeq = useRef(0);
 
   // Bulk operations
   const [selectMode, setSelectMode] = useState(false);
@@ -57,20 +57,18 @@ export default function Materials() {
   const [exportingSelected, setExportingSelected] = useState(false);
 
   useEffect(() => {
-    const seq = ++effectSeq.current;
-    fetchFirstMaterials().then(items => {
-      if (seq !== effectSeq.current) return;
-      setMaterials(items);
-      setHasMore(items.length === PAGE_SIZE);
+    run(() => fetchFirstMaterials()).then(items => {
+      if (items !== undefined) {
+        setMaterials(items);
+        setHasMore(items.length === PAGE_SIZE);
+      }
     }).catch(err => {
-      if (seq !== effectSeq.current) return;
       setError(getApiErrorMessage(err, '加载资料失败，请检查后端服务。'));
     }).finally(() => {
-      if (seq !== effectSeq.current) return;
       setLoadingMaterials(false);
     });
-    return () => { effectSeq.current += 1; };
-  }, []);
+    return cancel;
+  }, [run, cancel]);
 
   const loadFirstPage = useCallback(async () => {
     setLoadingMaterials(true);
@@ -149,18 +147,7 @@ export default function Materials() {
   };
 
   // Deep link: auto-open material detail
-  useEffect(() => {
-    const openId = searchParams.get('open');
-    if (openId) {
-      const id = parseInt(openId, 10);
-      if (!isNaN(id)) {
-        setTimeout(() => {
-          handleViewDetail(id).catch(() => {});
-          setSearchParams({}, { replace: true });
-        }, 0);
-      }
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useDeepLink((id) => handleViewDetail(id).catch(() => {}));
 
   const handleDelete = async (id: number) => {
     if (deletingId === id) return;
@@ -197,16 +184,18 @@ export default function Materials() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return;
-    if (!confirm(`确认删除选中的 ${selectedIds.size} 个资料？此操作不可撤销。`)) return;
+    if (!window.confirm(`确认删除选中的 ${selectedIds.size} 个资料？此操作不可撤销。`)) return;
+    const idsToDelete = Array.from(selectedIds);
     setBulkDeleting(true);
     setError('');
     try {
-      const result = await bulkDeleteMaterials(Array.from(selectedIds));
+      const result = await bulkDeleteMaterials(idsToDelete);
       setSelectedIds(new Set());
       setSelectMode(false);
       await loadFirstPage();
-      setResults(prev => prev.filter(r => !selectedIds.has(r.material_id)));
-      if (selectedMaterial && selectedIds.has(selectedMaterial.id)) setSelectedMaterial(null);
+      const deleteSet = new Set(idsToDelete);
+      setResults(prev => prev.filter(r => !deleteSet.has(r.material_id)));
+      if (selectedMaterial && deleteSet.has(selectedMaterial.id)) setSelectedMaterial(null);
       if (result.missing > 0) {
         setError(`已删除 ${result.deleted} 个，${result.missing} 个未找到。`);
       }

@@ -95,16 +95,23 @@ async def error_stats(db: AsyncSession = Depends(get_db)):
     )
     by_knowledge_point = [{"name": r.name, "count": r.count} for r in kp_q]
 
-    # Created last 30 days
+    # Created last 30 days (single query)
     today_obj = local_date_obj()
+    start_30 = (today_obj - timedelta(days=29)).isoformat()
+    trend_q = await db.execute(
+        select(
+            local_date.label("d"),
+            func.count().label("cnt"),
+        )
+        .where(local_date >= start_30)
+        .group_by("d")
+    )
+    trend_map: dict[str, int] = {r.d: r.cnt for r in trend_q}
     items = []
     for i in range(29, -1, -1):
         d = today_obj - timedelta(days=i)
         ds = d.isoformat()
-        cnt_q = await db.execute(
-            select(func.count()).where(local_date == ds)
-        )
-        items.append({"date": ds, "count": cnt_q.scalar() or 0})
+        items.append({"date": ds, "count": trend_map.get(ds, 0)})
 
     return {
         "total": total,

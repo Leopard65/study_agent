@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +8,6 @@ from app.models import (
     Material, MaterialChunk, ChatHistory, ErrorBook,
     StudyPlan, ProblemRecord, ExamQuestion, ExamAttempt,
 )
-from app.utils.date import local_today
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
@@ -95,7 +94,7 @@ async def export_json(db: AsyncSession = Depends(get_db)):
     ]
 
     return JSONResponse(content={
-        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
         "version": "0.2",
         "materials": materials,
         "material_chunks_count": chunks_count,

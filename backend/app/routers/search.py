@@ -87,15 +87,15 @@ async def global_search(
     # Exam
     if "exam" in type_set:
         rows = await db.execute(text(
-            "SELECT id, title, question, tags, solution, created_at FROM exam_questions "
-            "WHERE title LIKE :q OR question LIKE :q OR tags LIKE :q OR solution LIKE :q LIMIT :l"
+            "SELECT id, title, question, tags, created_at FROM exam_questions "
+            "WHERE title LIKE :q OR question LIKE :q OR tags LIKE :q LIMIT :l"
         ).bindparams(q=f"%{q}%", l=per_type))
         for r in rows.fetchall():
             results.append({
                 "type": "exam", "id": r[0],
                 "title": r[1] or "真题",
                 "snippet": _plain_snippet(r[2]),
-                "created_at": str(r[5]) if r[5] else None,
+                "created_at": str(r[4]) if r[4] else None,
             })
 
     # Chat

@@ -311,9 +311,24 @@ export const exportJson = (): Promise<Blob> =>
   api.get('/export/json', { responseType: 'blob' }).then(r => r.data);
 
 // ── Import ──
+export interface ImportModuleStats {
+  total: number;
+  new_count: number;
+  conflict_count: number;
+  would_insert: number;
+  would_skip: number;
+  would_overwrite: number;
+  would_keep_both: number;
+}
+
 export interface ImportPreview {
   version: string;
   exported_at: string;
+  strategy: string;
+  total_conflicts: number;
+  modules: Record<string, ImportModuleStats>;
+  conflict_samples: Record<string, string[]>;
+  // Backward compat flat fields
   materials_count: number;
   error_book_count: number;
   study_plans_count: number;
@@ -326,13 +341,15 @@ export interface ImportPreview {
 export interface ImportResult {
   inserted: Record<string, number>;
   skipped: Record<string, number>;
+  overwritten: Record<string, number>;
+  kept_both: Record<string, number>;
 }
 
-export const importPreview = (data: Record<string, unknown>): Promise<ImportPreview> =>
-  api.post<ImportPreview>('/import/preview', data).then(r => r.data);
+export const importPreview = (data: Record<string, unknown>, strategy = 'skip'): Promise<ImportPreview> =>
+  api.post<ImportPreview>('/import/preview', data, { params: { strategy } }).then(r => r.data);
 
-export const importJson = (data: Record<string, unknown>): Promise<ImportResult> =>
-  api.post<ImportResult>('/import/json', data).then(r => r.data);
+export const importJson = (data: Record<string, unknown>, strategy = 'skip'): Promise<ImportResult> =>
+  api.post<ImportResult>('/import/json', data, { params: { strategy } }).then(r => r.data);
 
 // ── Settings ──
 export const getReviewSettings = (): Promise<{ intervals: number[] }> =>

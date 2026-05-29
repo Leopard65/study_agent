@@ -1,14 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useState } from 'react';
 import { listPlans, createPlan, updatePlan, deletePlan, generatePlan, getApiErrorMessage } from '../api/client';
 import type { StudyPlanItem } from '../api/client';
-
-function fetchPlans(): Promise<StudyPlanItem[]> {
-  return listPlans();
-}
+import { useSafeAsync } from '../hooks/useSafeAsync';
+import { useDeepLink } from '../hooks/useDeepLink';
 
 export default function StudyPlan() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const { run, cancel } = useSafeAsync();
   const [plans, setPlans] = useState<StudyPlanItem[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showGen, setShowGen] = useState(false);
@@ -21,42 +18,31 @@ export default function StudyPlan() {
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
-  const effectSeq = useRef(0);
 
   useEffect(() => {
-    const seq = ++effectSeq.current;
-    fetchPlans().then(items => {
-      if (seq !== effectSeq.current) return;
-      setError('');
-      setPlans(items);
+    run(() => listPlans()).then(items => {
+      if (items !== undefined) {
+        setError('');
+        setPlans(items);
+      }
     }).catch(err => {
-      if (seq !== effectSeq.current) return;
       setError(getApiErrorMessage(err, '加载计划失败，请检查后端服务。'));
     });
-    return () => { effectSeq.current += 1; };
-  }, []);
+    return cancel;
+  }, [run, cancel]);
 
   // Deep link: scroll to and highlight
-  useEffect(() => {
-    const openId = searchParams.get('open');
-    if (openId) {
-      const id = parseInt(openId, 10);
-      if (!isNaN(id)) {
-        setTimeout(() => {
-          setHighlightId(id);
-          setSearchParams({}, { replace: true });
-          setTimeout(() => {
-            document.getElementById(`plan-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }, 300);
-          setTimeout(() => setHighlightId(null), 3000);
-        }, 0);
-      }
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useDeepLink((id) => {
+    setHighlightId(id);
+    setTimeout(() => {
+      document.getElementById(`plan-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 300);
+    setTimeout(() => setHighlightId(null), 3000);
+  });
 
   const load = useCallback(async () => {
     try {
-      const items = await fetchPlans();
+      const items = await listPlans();
       setError('');
       setPlans(items);
     } catch (err) {

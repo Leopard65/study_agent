@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { solveProblem, createError, getApiErrorMessage } from '../api/client';
 import { formatLocalDate } from '../utils/date';
+import { SUBJECTS } from '../utils/constants';
 import LatexRenderer from '../components/LatexRenderer';
 
 export default function ProblemSolver() {
@@ -59,10 +60,7 @@ export default function ProblemSolver() {
             onChange={e => { setSubject(e.target.value); setSaved(false); setSaveError(''); }}
           >
             <option value="">自动判断</option>
-            <option value="高等数学">高等数学</option>
-            <option value="线性代数">线性代数</option>
-            <option value="概率论">概率论</option>
-            <option value="信号与系统">信号与系统</option>
+            {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <div className="mb-4">

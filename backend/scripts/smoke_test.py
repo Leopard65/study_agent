@@ -989,6 +989,15 @@ def run(client: TestClient):
     check("preview error_book_count=2", pv["error_book_count"] == 2)
     check("preview exam_questions_count=2", pv["exam_questions_count"] == 2)
     check("preview exam_attempts_count=3", pv["exam_attempts_count"] == 3)
+    check("preview has modules", "modules" in pv)
+    check("preview has conflict_samples", "conflict_samples" in pv)
+    check("preview has total_conflicts", "total_conflicts" in pv)
+    check("preview strategy default", pv["strategy"] == "skip")
+    # First import: no conflicts yet (DB is empty)
+    check("preview total_conflicts=0 (first import)", pv["total_conflicts"] == 0)
+    check("preview materials new_count=2", pv["modules"]["materials"]["new_count"] == 2)
+    check("preview error_book new_count=2", pv["modules"]["error_book"]["new_count"] == 2)
+    check("preview materials conflict_count=0", pv["modules"]["materials"]["conflict_count"] == 0)
 
     # Verify preview did NOT write to DB
     r_before = client.get("/api/exam/questions")
@@ -1000,6 +1009,8 @@ def run(client: TestClient):
     result = r.json()
     ins = result["inserted"]
     skp = result["skipped"]
+    check("has overwritten key", "overwritten" in result)
+    check("has kept_both key", "kept_both" in result)
     check("inserted 1 material (dup skipped)", ins["materials"] == 1, f"got ins={ins['materials']}, skp={skp['materials']}")
     check("skipped 1 material dup", skp["materials"] == 1)
     check("inserted 1 error (dup skipped)", ins["error_book"] == 1, f"got ins={ins['error_book']}, skp={skp['error_book']}")
@@ -1050,6 +1061,80 @@ def run(client: TestClient):
     check("all chat skipped on reimport", ins2["chat_history"] == 0)
     check("all exam_questions skipped on reimport", ins2["exam_questions"] == 0)
 
+    # ── 19d2. Conflict preview detection ──
+    print("\n[19d2] POST /api/import/preview (conflict detection, strategy=skip)")
+    r = client.post("/api/import/preview", json=backup, params={"strategy": "skip"})
+    check("conflict preview skip 200", r.status_code == 200)
+    pv_skip = r.json()
+    check("conflict preview has modules", "modules" in pv_skip)
+    check("conflict preview total_conflicts > 0", pv_skip["total_conflicts"] > 0, f"got {pv_skip['total_conflicts']}")
+    check("conflict preview strategy=skip", pv_skip["strategy"] == "skip")
+    # Materials: 2 items, 1 dup in file, both conflict with DB
+    check("materials conflict_count=2", pv_skip["modules"]["materials"]["conflict_count"] == 2)
+    check("materials new_count=0", pv_skip["modules"]["materials"]["new_count"] == 0)
+    check("materials would_skip=2", pv_skip["modules"]["materials"]["would_skip"] == 2)
+    check("materials would_insert=0", pv_skip["modules"]["materials"]["would_insert"] == 0)
+    check("materials would_overwrite=0", pv_skip["modules"]["materials"]["would_overwrite"] == 0)
+    # Error book: 2 items, 1 dup in file, both conflict with DB
+    check("error_book conflict_count=2", pv_skip["modules"]["error_book"]["conflict_count"] == 2)
+    check("error_book would_skip=2", pv_skip["modules"]["error_book"]["would_skip"] == 2)
+    # Has conflict samples
+    check("has conflict_samples", len(pv_skip["conflict_samples"]) > 0)
+
+    print("\n[19d3] POST /api/import/preview (conflict detection, strategy=overwrite)")
+    r = client.post("/api/import/preview", json=backup, params={"strategy": "overwrite"})
+    check("conflict preview overwrite 200", r.status_code == 200)
+    pv_ow = r.json()
+    check("conflict preview strategy=overwrite", pv_ow["strategy"] == "overwrite")
+    check("materials would_overwrite=2", pv_ow["modules"]["materials"]["would_overwrite"] == 2)
+    check("materials would_skip=0", pv_ow["modules"]["materials"]["would_skip"] == 0)
+    check("error_book would_overwrite=2", pv_ow["modules"]["error_book"]["would_overwrite"] == 2)
+    check("chat would_skip (immutable)", pv_ow["modules"]["chat_history"]["would_skip"] == 1)
+
+    print("\n[19d4] POST /api/import/preview (conflict detection, strategy=keep_both)")
+    r = client.post("/api/import/preview", json=backup, params={"strategy": "keep_both"})
+    check("conflict preview keep_both 200", r.status_code == 200)
+    pv_kb = r.json()
+    check("conflict preview strategy=keep_both", pv_kb["strategy"] == "keep_both")
+    check("materials would_keep_both=2", pv_kb["modules"]["materials"]["would_keep_both"] == 2)
+    check("materials would_skip=0", pv_kb["modules"]["materials"]["would_skip"] == 0)
+    check("error_book would_keep_both=2", pv_kb["modules"]["error_book"]["would_keep_both"] == 2)
+
+    print("\n[19d5] POST /api/import/preview (invalid strategy)")
+    r = client.post("/api/import/preview", json=backup, params={"strategy": "bad"})
+    check("preview invalid strategy 422", r.status_code == 422)
+
+    print("\n[19d5b] POST /api/import/preview (rapid strategy switching)")
+    # Simulate rapid strategy switches: skip -> overwrite -> keep_both -> skip
+    # Each should return correct strategy label and conflict handling
+    for strat, expected_ow, expected_skip, expected_kb in [
+        ("skip", 0, 2, 0), ("overwrite", 2, 0, 0), ("keep_both", 0, 0, 2), ("skip", 0, 2, 0),
+    ]:
+        r = client.post("/api/import/preview", json=backup, params={"strategy": strat})
+        check(f"rapid {strat} 200", r.status_code == 200)
+        d = r.json()
+        check(f"rapid {strat} strategy label", d["strategy"] == strat)
+        check(f"rapid {strat} materials would_overwrite={expected_ow}", d["modules"]["materials"]["would_overwrite"] == expected_ow)
+        check(f"rapid {strat} materials would_skip={expected_skip}", d["modules"]["materials"]["would_skip"] == expected_skip)
+        check(f"rapid {strat} materials would_keep_both={expected_kb}", d["modules"]["materials"]["would_keep_both"] == expected_kb)
+
+    print("\n[19d5c] POST /api/import/preview (preview is read-only, no side effects)")
+    count_before_preview = len(client.get("/api/exam/questions").json())
+    for _ in range(5):
+        client.post("/api/import/preview", json=backup, params={"strategy": "overwrite"})
+    count_after_preview = len(client.get("/api/exam/questions").json())
+    check("preview did not change DB", count_after_preview == count_before_preview, f"before={count_before_preview}, after={count_after_preview}")
+
+    print("\n[19d6] Preview matches actual import (skip)")
+    pv_mods = pv_skip["modules"]
+    # Actual import with skip should match preview predictions
+    r = client.post("/api/import/json", json=backup, params={"strategy": "skip"})
+    check("verify skip import 200", r.status_code == 200)
+    vr = r.json()
+    for mod in ["materials", "error_book", "study_plans", "problems", "chat_history", "exam_questions"]:
+        check(f"skip {mod} inserted matches", vr["inserted"][mod] == pv_mods[mod]["would_insert"], f"actual={vr['inserted'][mod]}, preview={pv_mods[mod]['would_insert']}")
+        check(f"skip {mod} skipped matches", vr["skipped"][mod] == pv_mods[mod]["would_skip"], f"actual={vr['skipped'][mod]}, preview={pv_mods[mod]['would_skip']}")
+
     # Cleanup imported data
     for q in r_eqs.json():
         if q["title"].startswith("导入真题"):
@@ -1060,6 +1145,103 @@ def run(client: TestClient):
     for p in client.get("/api/plan").json():
         if p.get("task", "").startswith("导入任务"):
             client.delete(f"/api/plan/{p['id']}")
+
+    # ── 19e. Import conflict strategies ──
+    print("\n[19e] POST /api/import/json (invalid strategy)")
+    r = client.post("/api/import/json", json=backup, params={"strategy": "invalid"})
+    check("invalid strategy 422", r.status_code == 422, f"got {r.status_code}")
+
+    print("\n[19f] POST /api/import/json (no conflict, empty data)")
+    empty_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.2",
+        "materials": [], "material_chunks_count": 0, "chat_history": [],
+        "error_book": [], "study_plans": [], "problems": [],
+        "exam_questions": [], "exam_attempts": [],
+    }
+    r = client.post("/api/import/json", json=empty_backup, params={"strategy": "skip"})
+    check("empty import 200", r.status_code == 200)
+    res_empty = r.json()
+    check("empty all inserted=0", all(v == 0 for v in res_empty["inserted"].values()))
+    check("empty all skipped=0", all(v == 0 for v in res_empty["skipped"].values()))
+
+    # Prepare conflict data: import once, then import same data with different strategies
+    conflict_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.2",
+        "materials": [{"filename": "冲突测试.txt", "file_type": ".txt"}],
+        "material_chunks_count": 0,
+        "chat_history": [{"question": "冲突问答Q", "answer": "冲突问答A"}],
+        "error_book": [{"question": "冲突错题Q", "error_type": "冲突", "subject": "原科目"}],
+        "study_plans": [{"date": "2099-12-01", "subject": "冲突科目", "task": "冲突任务"}],
+        "problems": [{"question": "冲突解析Q", "solution": "原解法"}],
+        "exam_questions": [{"id": 8001, "title": "冲突真题T", "question": "冲突真题Q", "answer": "原答案"}],
+        "exam_attempts": [],
+    }
+    # First import: insert all
+    r = client.post("/api/import/json", json=conflict_backup)
+    check("conflict first import 200", r.status_code == 200)
+    check("conflict first all inserted", all(v > 0 for k, v in r.json()["inserted"].items() if k != "exam_attempts"))
+
+    print("\n[19g] POST /api/import/json (strategy=skip)")
+    r = client.post("/api/import/json", json=conflict_backup, params={"strategy": "skip"})
+    check("skip 200", r.status_code == 200)
+    skip_res = r.json()
+    check("skip all skipped", all(v > 0 for k, v in skip_res["skipped"].items() if k != "exam_attempts"))
+    check("skip nothing inserted", all(v == 0 for k, v in skip_res["inserted"].items() if k != "exam_attempts"))
+    check("skip nothing overwritten", all(v == 0 for v in skip_res["overwritten"].values()))
+    check("skip nothing kept_both", all(v == 0 for v in skip_res["kept_both"].values()))
+
+    print("\n[19h] POST /api/import/json (strategy=overwrite)")
+    conflict_backup["error_book"][0]["subject"] = "覆盖科目"
+    conflict_backup["problems"][0]["solution"] = "覆盖解法"
+    r = client.post("/api/import/json", json=conflict_backup, params={"strategy": "overwrite"})
+    check("overwrite 200", r.status_code == 200)
+    ow_res = r.json()
+    check("overwrite errors overwritten", ow_res["overwritten"]["error_book"] >= 1)
+    check("overwrite problems overwritten", ow_res["overwritten"]["problems"] >= 1)
+    check("overwrite nothing inserted (all existed)", all(v == 0 for k, v in ow_res["inserted"].items() if k not in ("exam_attempts",)))
+    # Verify overwritten values
+    r_errs = client.get("/api/errors")
+    conflict_err = [e for e in r_errs.json() if e["question"] == "冲突错题Q"]
+    if conflict_err:
+        check("error subject overwritten", conflict_err[0]["subject"] == "覆盖科目")
+    r_probs = client.get("/api/problems/history")
+    conflict_prob = [p for p in r_probs.json() if p["question"] == "冲突解析Q"]
+    if conflict_prob:
+        check("problem solution overwritten", conflict_prob[0]["solution"] == "覆盖解法")
+
+    print("\n[19i] POST /api/import/json (strategy=keep_both)")
+    r = client.post("/api/import/json", json=conflict_backup, params={"strategy": "keep_both"})
+    check("keep_both 200", r.status_code == 200)
+    kb_res = r.json()
+    check("keep_both errors kept", kb_res["kept_both"]["error_book"] >= 1)
+    check("keep_both problems kept", kb_res["kept_both"]["problems"] >= 1)
+    check("keep_both nothing overwritten", all(v == 0 for v in kb_res["overwritten"].values()))
+    # Verify both copies exist
+    r_errs2 = client.get("/api/errors")
+    err_qs = [e["question"] for e in r_errs2.json()]
+    check("original error exists", "冲突错题Q" in err_qs)
+    check("copy error exists", any("副本" in q for q in err_qs), f"got {err_qs}")
+    r_probs2 = client.get("/api/problems/history")
+    prob_qs = [p["question"] for p in r_probs2.json()]
+    check("original problem exists", "冲突解析Q" in prob_qs)
+    check("copy problem exists", any("副本" in q for q in prob_qs))
+
+    # Cleanup conflict test data
+    for q in client.get("/api/exam/questions").json():
+        if q["title"].startswith("冲突真题"):
+            client.delete(f"/api/exam/questions/{q['id']}")
+    for e in client.get("/api/errors").json():
+        if e["question"].startswith("冲突错题"):
+            client.delete(f"/api/errors/{e['id']}")
+    for p in client.get("/api/plan").json():
+        if p.get("task", "").startswith("冲突任务"):
+            client.delete(f"/api/plan/{p['id']}")
+    for p in client.get("/api/problems/history").json():
+        if p["question"].startswith("冲突解析"):
+            client.delete(f"/api/problems/{p['id']}")
+    for m in client.get("/api/materials").json():
+        if m["filename"].startswith("冲突测试"):
+            client.delete(f"/api/materials/{m['id']}")
 
     # ── 20. Dashboard trends ──
     print("\n[20] GET /api/dashboard/trends")

@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useState } from 'react';
 import {
   listExamQuestions, createExamQuestion, submitExamAttempt,
   addExamToErrors, deleteExamQuestion, generateExamQuestions,
@@ -7,11 +6,12 @@ import {
 } from '../api/client';
 import type { ExamQuestionItem, ExamAttemptItem, ExamDraftItem } from '../api/client';
 import LatexRenderer from '../components/LatexRenderer';
-
-const SUBJECTS = ['高等数学', '线性代数', '概率论', '信号与系统', '其他'];
+import { SUBJECTS } from '../utils/constants';
+import { useSafeAsync } from '../hooks/useSafeAsync';
+import { useDeepLink } from '../hooks/useDeepLink';
 
 export default function ExamPractice() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const { run, cancel } = useSafeAsync();
   const [questions, setQuestions] = useState<ExamQuestionItem[]>([]);
   const [filterSubject, setFilterSubject] = useState('');
   const [filterYear, setFilterYear] = useState('');
@@ -48,48 +48,41 @@ export default function ExamPractice() {
   const [expandedDraft, setExpandedDraft] = useState<number | null>(null);
   const [savingDraft, setSavingDraft] = useState<number | null>(null);
 
-  const effectSeq = useRef(0);
+  useEffect(() => {
+    const params: Record<string, string> = {};
+    if (filterSubject) params.subject = filterSubject;
+    if (filterYear) params.year = filterYear;
+    if (filterTag) params.tag = filterTag;
+    run(() => listExamQuestions(Object.keys(params).length ? params : undefined))
+      .then(items => {
+        if (items !== undefined) {
+          setError('');
+          setQuestions(items);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        setError(getApiErrorMessage(err, '加载题目失败，请检查后端服务。'));
+        setLoading(false);
+      });
+    return cancel;
+  }, [filterSubject, filterYear, filterTag, run, cancel]);
 
-  const loadQuestions = useCallback(async (seq?: number) => {
-    setLoading(true);
-    setError('');
+  const loadQuestions = useCallback(async () => {
+    const params: Record<string, string> = {};
+    if (filterSubject) params.subject = filterSubject;
+    if (filterYear) params.year = filterYear;
+    if (filterTag) params.tag = filterTag;
     try {
-      const params: Record<string, string> = {};
-      if (filterSubject) params.subject = filterSubject;
-      if (filterYear) params.year = filterYear;
-      if (filterTag) params.tag = filterTag;
       const items = await listExamQuestions(Object.keys(params).length ? params : undefined);
-      if (seq !== undefined && seq !== effectSeq.current) return;
       setQuestions(items);
     } catch (err) {
-      if (seq !== undefined && seq !== effectSeq.current) return;
       setError(getApiErrorMessage(err, '加载题目失败，请检查后端服务。'));
-    } finally {
-      if (seq !== undefined && seq !== effectSeq.current) { /* stale */ } else {
-        setLoading(false);
-      }
     }
   }, [filterSubject, filterYear, filterTag]);
 
-  useEffect(() => {
-    const seq = ++effectSeq.current;
-    loadQuestions(seq);
-    return () => { effectSeq.current += 1; };
-  }, [loadQuestions]);
-
   // Deep link: auto-expand exam question
-  useEffect(() => {
-    const openId = searchParams.get('open');
-    if (openId) {
-      const id = parseInt(openId, 10);
-      if (!isNaN(id)) {
-        setTimeout(() => {
-          setExpandedId(id);
-          setSearchParams({}, { replace: true });
-        }, 0);
-      }
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useDeepLink((id) => setExpandedId(id));
 
   const handleAdd = async () => {
     if (!addForm.title.trim() || !addForm.question.trim()) return;
@@ -202,7 +195,7 @@ export default function ExamPractice() {
     }
   };
 
-  const setForm = (key: string, val: string) => setAddForm(f => ({ ...f, [key]: val }));
+  const setForm = (key: keyof typeof addForm, val: string) => setAddForm(f => ({ ...f, [key]: val }));
 
   const expandedQuestion = questions.find(q => q.id === expandedId);
 

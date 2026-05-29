@@ -10,6 +10,8 @@ from app.routers import chat, materials, problems, errors, plan, dashboard, exam
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    os.makedirs(settings.upload_dir, exist_ok=True)
     await init_db()
     yield
 
@@ -57,7 +59,9 @@ async def health():
 
     # upload_dir check
     try:
-        os.makedirs(settings.upload_dir, exist_ok=True)
+        if not os.path.isdir(settings.upload_dir):
+            upload_status = "error"
+            detail_parts.append("upload_dir: directory does not exist")
     except Exception as e:
         upload_status = "error"
         detail_parts.append(f"upload_dir: {e}")

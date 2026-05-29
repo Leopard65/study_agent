@@ -59,6 +59,8 @@ async def chat(question: str, context: str | None = None) -> str:
         raise
     except Exception as e:
         raise LLMCallError(f"AI 接口调用失败：{e}") from e
+    if not response.choices:
+        raise LLMCallError("AI 返回了空响应，请重试")
     return response.choices[0].message.content or ""
 
 
@@ -82,6 +84,8 @@ async def solve_problem(question: str, subject: str = "") -> str:
         raise
     except Exception as e:
         raise LLMCallError(f"AI 接口调用失败：{e}") from e
+    if not response.choices:
+        raise LLMCallError("AI 返回了空响应，请重试")
     return response.choices[0].message.content or ""
 
 
@@ -124,6 +128,8 @@ async def generate_exam_questions(
         raise
     except Exception as e:
         raise LLMCallError(f"AI 接口调用失败：{e}") from e
+    if not response.choices:
+        raise LLMCallError("AI 返回了空响应，请重试")
     return response.choices[0].message.content or ""
 
 
@@ -157,4 +163,6 @@ async def generate_plan(subjects: list[str], daily_hours: int, days: int, start_
         raise
     except Exception as e:
         raise LLMCallError(f"AI 接口调用失败：{e}") from e
+    if not response.choices:
+        raise LLMCallError("AI 返回了空响应，请重试")
     return response.choices[0].message.content or ""

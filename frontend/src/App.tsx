@@ -3,7 +3,8 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { PreferencesProvider } from './hooks/usePreferences';
 import Sidebar from './components/Sidebar';
 import CommandPalette from './components/CommandPalette';
-import { exportJson, getApiErrorMessage } from './api/client';
+import { exportJson } from './api/client';
+import { downloadBlob } from './utils/constants';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const QA = lazy(() => import('./pages/QA'));
@@ -27,18 +28,9 @@ function AppInner() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const handleExport = useCallback(async () => {
-    try {
-      const blob = await exportJson();
-      const date = new Date().toISOString().slice(0, 10);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `math_agent_backup_${date}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      alert(getApiErrorMessage(null, '导出失败'));
-    }
+    const blob = await exportJson();
+    const date = new Date().toISOString().slice(0, 10);
+    downloadBlob(blob, `math_agent_backup_${date}.json`);
   }, []);
 
   useEffect(() => {

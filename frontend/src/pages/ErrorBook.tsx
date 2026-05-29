@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, CartesianGrid } from 'recharts';
 import { listErrors, createError, updateError, deleteError, getReviewSettings, updateReviewSettings, getErrorStats, getApiErrorMessage } from '../api/client';
 import type { ErrorBookItem, ErrorStats } from '../api/client';
 import LatexRenderer from '../components/LatexRenderer';
 import { formatLocalDate } from '../utils/date';
+import { usePreferences } from '../hooks/usePreferences';
+import { useSafeAsync } from '../hooks/useSafeAsync';
+import { useDeepLink } from '../hooks/useDeepLink';
 
 const emptyForm = {
   subject: '', chapter: '', knowledge_point: '', question: '',
@@ -34,24 +38,24 @@ function fetchErrorsByFilter(filter: Filter): Promise<ErrorBookItem[]> {
   return listErrors(mastered);
 }
 
-function BarRow({ label, count, max, color }: { label: string; count: number; max: number; color: string }) {
-  const pct = max > 0 ? Math.round((count / max) * 100) : 0;
+const PIE_COLORS = ['#3b82f6', '#ef4444', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'];
+
+function EmptyChart({ text }: { text: string }) {
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className="w-24 truncate text-gray-600 dark:text-gray-300 shrink-0" title={label}>{label}</span>
-      <div className="flex-1 h-4 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden">
-        <div className={`h-full ${color} rounded`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="w-8 text-right text-gray-500 dark:text-gray-400 text-xs">{count}</span>
+    <div className="flex items-center justify-center h-32 text-xs text-gray-400 dark:text-gray-500">
+      {text}
     </div>
   );
 }
 
 function ErrorStatsPanel({ stats }: { stats: ErrorStats }) {
-  const maxSubject = Math.max(1, ...stats.by_subject.map(s => s.count));
-  const maxType = Math.max(1, ...stats.by_error_type.map(s => s.count));
-  const maxKp = Math.max(1, ...stats.by_knowledge_point.map(s => s.count));
-  const maxTrend = Math.max(1, ...stats.created_last_30_days.map(d => d.count));
+  const { theme } = usePreferences();
+  const isDark = theme === 'dark' || (theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const tickColor = isDark ? '#9ca3af' : '#6b7280';
+  const tooltipBg = isDark ? '#374151' : '#ffffff';
+  const tooltipBorder = isDark ? '#4b5563' : '#e5e7eb';
+  const tooltipText = isDark ? '#f3f4f6' : '#111827';
+  const gridColor = isDark ? '#374151' : '#f3f4f6';
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 space-y-5">
@@ -70,78 +74,142 @@ function ErrorStatsPanel({ stats }: { stats: ErrorStats }) {
         ))}
       </div>
 
-      {/* Distributions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* By subject */}
-        <div>
-          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">科目分布</h4>
-          {stats.by_subject.length === 0 ? (
-            <p className="text-xs text-gray-400">暂无数据</p>
-          ) : (
-            <div className="space-y-1.5">
-              {stats.by_subject.map(s => (
-                <BarRow key={s.name} label={s.name} count={s.count} max={maxSubject} color="bg-blue-500" />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* By error type */}
-        <div>
-          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">错误类型</h4>
-          {stats.by_error_type.length === 0 ? (
-            <p className="text-xs text-gray-400">暂无数据</p>
-          ) : (
-            <div className="space-y-1.5">
-              {stats.by_error_type.map(s => (
-                <BarRow key={s.name} label={s.name} count={s.count} max={maxType} color="bg-red-400" />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* By knowledge point */}
-        <div>
-          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">知识点 Top 10</h4>
-          {stats.by_knowledge_point.length === 0 ? (
-            <p className="text-xs text-gray-400">暂无数据</p>
-          ) : (
-            <div className="space-y-1.5">
-              {stats.by_knowledge_point.map(s => (
-                <BarRow key={s.name} label={s.name} count={s.count} max={maxKp} color="bg-purple-400" />
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* 30-day trend */}
       <div>
         <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">最近 30 天新增错题</h4>
-        <div className="flex items-end gap-px h-20">
-          {stats.created_last_30_days.map(d => {
-            const h = maxTrend > 0 ? Math.max(1, Math.round((d.count / maxTrend) * 100)) : 1;
-            return (
-              <div key={d.date} className="flex-1 flex flex-col items-center justify-end h-full group">
-                <div
-                  className="w-full bg-teal-400 dark:bg-teal-500 rounded-t"
-                  style={{ height: `${h}%` }}
-                  title={`${d.date}: ${d.count}`}
+        {stats.created_last_30_days.length === 0 ? (
+          <EmptyChart text="暂无数据" />
+        ) : (
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={stats.created_last_30_days} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#14b8a6" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#14b8a6" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+              <XAxis
+                dataKey="date"
+                tick={{ fontSize: 10, fill: tickColor }}
+                tickFormatter={v => v.slice(5)}
+                interval="preserveStartEnd"
+              />
+              <YAxis tick={{ fontSize: 10, fill: tickColor }} allowDecimals={false} />
+              <Tooltip
+                contentStyle={{ background: tooltipBg, border: `1px solid ${tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: tooltipText }}
+                itemStyle={{ color: tooltipText }}
+                labelFormatter={v => `日期: ${v}`}
+                formatter={(value) => [`${value} 道`, '新增错题']}
+              />
+              <Area type="monotone" dataKey="count" stroke="#14b8a6" fill="url(#trendFill)" strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Distributions */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* By subject - horizontal bar */}
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">科目分布</h4>
+          {stats.by_subject.length === 0 ? (
+            <EmptyChart text="暂无数据" />
+          ) : (
+            <ResponsiveContainer width="100%" height={Math.max(120, stats.by_subject.length * 28)}>
+              <BarChart data={stats.by_subject} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridColor} horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: tickColor }} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: tickColor }} width={70} />
+                <Tooltip
+                  contentStyle={{ background: tooltipBg, border: `1px solid ${tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: tooltipText }}
+                  itemStyle={{ color: tooltipText }}
+                  formatter={(value) => [`${value} 道`, '错题数']}
                 />
-              </div>
-            );
-          })}
+                <Bar dataKey="count" fill="#3b82f6" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
-        <div className="flex justify-between text-[10px] text-gray-400 mt-1">
-          <span>{stats.created_last_30_days[0]?.date.slice(5)}</span>
-          <span>{stats.created_last_30_days[stats.created_last_30_days.length - 1]?.date.slice(5)}</span>
+
+        {/* By error type - pie */}
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">错误类型</h4>
+          {stats.by_error_type.length === 0 ? (
+            <EmptyChart text="暂无数据" />
+          ) : (
+            <ResponsiveContainer width="100%" height={180}>
+              <PieChart>
+                <Pie
+                  data={stats.by_error_type}
+                  dataKey="count"
+                  nameKey="name"
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={65}
+                  innerRadius={30}
+                  paddingAngle={2}
+                  label={({ name, percent }) => (percent ?? 0) > 0.05 ? `${name}` : ''}
+                  labelLine={false}
+                >
+                  {stats.by_error_type.map((_, i) => (
+                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{ background: tooltipBg, border: `1px solid ${tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: tooltipText }}
+                  itemStyle={{ color: tooltipText }}
+                  formatter={(value, name) => [`${value} 道`, name]}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* By knowledge point - horizontal bar */}
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">知识点 Top 10</h4>
+          {stats.by_knowledge_point.length === 0 ? (
+            <EmptyChart text="暂无数据" />
+          ) : (
+            <ResponsiveContainer width="100%" height={Math.max(120, stats.by_knowledge_point.length * 28)}>
+              <BarChart data={stats.by_knowledge_point} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridColor} horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: tickColor }} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: tickColor }} width={70} />
+                <Tooltip
+                  contentStyle={{ background: tooltipBg, border: `1px solid ${tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: tooltipText }}
+                  itemStyle={{ color: tooltipText }}
+                  formatter={(value) => [`${value} 道`, '错题数']}
+                />
+                <Bar dataKey="count" fill="#8b5cf6" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
+
+      {/* Pie chart legend */}
+      {stats.by_error_type.length > 0 && (
+        <div className="flex flex-wrap gap-2 -mt-2">
+          {stats.by_error_type.map((entry, i) => (
+            <span key={entry.name} className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
+              <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }} />
+              {entry.name} ({entry.count})
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 export default function ErrorBook() {
+  const { run, cancel } = useSafeAsync();
   const [searchParams, setSearchParams] = useSearchParams();
   const filter = getFilterFromSearchParams(searchParams);
   const [errors, setErrors] = useState<ErrorBookItem[]>([]);
@@ -160,7 +228,6 @@ export default function ErrorBook() {
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
-  const effectSeq = useRef(0);
 
   // Stats
   const [showStats, setShowStats] = useState(false);
@@ -169,33 +236,23 @@ export default function ErrorBook() {
   const [statsError, setStatsError] = useState('');
 
   useEffect(() => {
-    const seq = ++effectSeq.current;
-    fetchErrorsByFilter(filter).then(items => {
-      if (seq !== effectSeq.current) return;
-      setError('');
-      setErrors(items);
+    run(() => fetchErrorsByFilter(filter)).then(items => {
+      if (items !== undefined) {
+        setError('');
+        setErrors(items);
+      }
     }).catch(err => {
-      if (seq !== effectSeq.current) return;
       setError(getApiErrorMessage(err, '加载错题失败，请检查后端服务。'));
     });
-    return () => { effectSeq.current += 1; };
-  }, [filter]);
+    return cancel;
+  }, [filter, run, cancel]);
 
   // Deep link: auto-expand and highlight
-  useEffect(() => {
-    const openId = searchParams.get('open');
-    if (openId) {
-      const id = parseInt(openId, 10);
-      if (!isNaN(id)) {
-        setTimeout(() => {
-          setExpandedId(id);
-          setHighlightId(id);
-          setSearchParams({}, { replace: true });
-          setTimeout(() => setHighlightId(null), 3000);
-        }, 0);
-      }
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useDeepLink((id) => {
+    setExpandedId(id);
+    setHighlightId(id);
+    setTimeout(() => setHighlightId(null), 3000);
+  });
 
   const loadErrors = useCallback(async () => {
     try {
@@ -293,7 +350,7 @@ export default function ErrorBook() {
     }
   };
 
-  const set = (key: string, val: string) => setForm(f => ({ ...f, [key]: val }));
+  const set = (key: keyof typeof emptyForm, val: string) => setForm(f => ({ ...f, [key]: val }));
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
