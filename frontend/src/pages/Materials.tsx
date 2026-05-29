@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, getApiErrorMessage } from '../api/client';
 import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
+import MaterialDetailModal from '../components/MaterialDetailModal';
 import { useSafeAsync } from '../hooks/useSafeAsync';
 import { useDeepLink } from '../hooks/useDeepLink';
 import { downloadBlob } from '../utils/constants';
@@ -393,36 +394,7 @@ export default function Materials() {
 
       {/* Detail Modal */}
       {selectedMaterial && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedMaterial(null)}>
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-4 border-b">
-              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 truncate">{selectedMaterial.filename}</h3>
-              <button onClick={() => setSelectedMaterial(null)} className="text-gray-400 hover:text-gray-600 text-xl ml-4">&times;</button>
-            </div>
-            <div className="px-6 py-4 overflow-y-auto flex-1">
-              <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400 mb-4">
-                <span>文件类型：{typeLabel[selectedMaterial.file_type] || selectedMaterial.file_type}</span>
-                <span>上传时间：{selectedMaterial.created_at ? new Date(selectedMaterial.created_at).toLocaleString() : '未知'}</span>
-                {selectedMaterial.stored_filename && <span>存储文件名：{selectedMaterial.stored_filename}</span>}
-                <span>文本长度：{selectedMaterial.content_length} 字符</span>
-              </div>
-              <div className="text-sm text-gray-700 dark:text-gray-300">
-                {selectedMaterial.preview ? (
-                  <>
-                    <pre className="whitespace-pre-wrap bg-gray-50 rounded p-4 max-h-96 overflow-y-auto text-sm leading-relaxed">
-                      {selectedMaterial.preview}
-                    </pre>
-                    {selectedMaterial.truncated && (
-                      <p className="text-gray-400 text-xs mt-2">仅显示前 {selectedMaterial.preview.length} 字符预览</p>
-                    )}
-                  </>
-                ) : (
-                  <p className="text-gray-400">暂无可预览文本，可能是文件解析失败或扫描版 PDF OCR 未识别到文字。</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+        <MaterialDetailModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
       )}
     </div>
   );

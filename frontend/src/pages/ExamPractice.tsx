@@ -5,7 +5,9 @@ import {
   getApiErrorMessage,
 } from '../api/client';
 import type { ExamQuestionItem, ExamAttemptItem, ExamDraftItem } from '../api/client';
-import LatexRenderer from '../components/LatexRenderer';
+import ExamGeneratePanel from '../components/ExamGeneratePanel';
+import ExamDraftList from '../components/ExamDraftList';
+import ExamQuestionCard from '../components/ExamQuestionCard';
 import { SUBJECTS } from '../utils/constants';
 import { useSafeAsync } from '../hooks/useSafeAsync';
 import { useDeepLink } from '../hooks/useDeepLink';
@@ -197,8 +199,6 @@ export default function ExamPractice() {
 
   const setForm = (key: keyof typeof addForm, val: string) => setAddForm(f => ({ ...f, [key]: val }));
 
-  const expandedQuestion = questions.find(q => q.id === expandedId);
-
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
@@ -260,104 +260,24 @@ export default function ExamPractice() {
 
       {/* AI Generate panel */}
       {showGenerate && (
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 mb-6">
-          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">AI 生成练习题草稿</h3>
-          <div className="grid grid-cols-2 gap-3 mb-3">
-            <select className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" value={genForm.subject} onChange={e => setGenForm(f => ({ ...f, subject: e.target.value }))}>
-              <option value="">选择科目（可选）</option>
-              {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" placeholder="知识点/主题 *" value={genForm.topic} onChange={e => setGenForm(f => ({ ...f, topic: e.target.value }))} />
-            <input className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" type="number" min={1} max={10} placeholder="数量" value={genForm.count} onChange={e => setGenForm(f => ({ ...f, count: e.target.value }))} />
-            <select className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100" value={genForm.difficulty} onChange={e => setGenForm(f => ({ ...f, difficulty: e.target.value }))}>
-              <option value="">难度（可选）</option>
-              <option value="easy">简单</option>
-              <option value="medium">中等</option>
-              <option value="hard">困难</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-3 mb-3">
-            <label className="flex items-center gap-1.5 text-sm text-gray-600">
-              <input type="checkbox" checked={genForm.use_materials} onChange={e => setGenForm(f => ({ ...f, use_materials: e.target.checked }))} />
-              检索资料库辅助出题
-            </label>
-            <button onClick={handleGenerate} disabled={generating || !genForm.topic.trim()} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
-              {generating ? '生成中...' : '开始生成'}
-            </button>
-          </div>
-
-          {genError && (
-            <div className="mb-3 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">{genError}</div>
-          )}
-          {genRawResponse && (
-            <details className="mb-3">
-              <summary className="text-xs text-gray-400 cursor-pointer">查看 AI 原始返回</summary>
-              <pre className="mt-1 p-3 bg-gray-50 dark:bg-gray-700 rounded text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap break-all max-h-60 overflow-auto">{genRawResponse}</pre>
-            </details>
-          )}
-        </div>
+        <ExamGeneratePanel
+          form={genForm}
+          onChange={setGenForm}
+          onGenerate={handleGenerate}
+          generating={generating}
+          error={genError}
+          rawResponse={genRawResponse}
+        />
       )}
 
       {/* AI Generated drafts */}
-      {drafts.length > 0 && (
-        <div className="mb-6">
-          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">生成草稿（{drafts.length} 题，点击展开预览）</h3>
-          <div className="space-y-2">
-            {drafts.map((d, idx) => (
-              <div key={idx} className="bg-white dark:bg-gray-800 rounded-xl shadow">
-                <div className="p-3 flex items-center justify-between cursor-pointer" onClick={() => setExpandedDraft(expandedDraft === idx ? null : idx)}>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap mb-1">
-                      {d.subject && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{d.subject}</span>}
-                      {d.year && <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">{d.year}</span>}
-                      {d.tags && d.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
-                        <span key={tag} className="px-2 py-0.5 bg-purple-100 text-purple-600 rounded text-xs">{tag}</span>
-                      ))}
-                    </div>
-                    <div className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">{d.title || '（无标题）'}</div>
-                  </div>
-                  <div className="flex items-center gap-2 ml-3">
-                    <button
-                      onClick={e => { e.stopPropagation(); handleSaveDraft(idx); }}
-                      disabled={savingDraft === idx}
-                      className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-xs"
-                    >
-                      {savingDraft === idx ? '保存中...' : '保存到题库'}
-                    </button>
-                    <span className="text-gray-400 text-xs">{expandedDraft === idx ? '▲' : '▼'}</span>
-                  </div>
-                </div>
-                {expandedDraft === idx && (
-                  <div className="px-3 pb-3 border-t">
-                    <div className="mt-2 mb-2">
-                      <div className="text-xs text-gray-400 mb-1">题目</div>
-                      <div className="prose prose-sm max-w-none bg-gray-50 dark:bg-gray-700 rounded p-2">
-                        <LatexRenderer content={d.question} />
-                      </div>
-                    </div>
-                    {d.answer && (
-                      <div className="mb-2">
-                        <div className="text-xs text-gray-400 mb-1">参考答案</div>
-                        <div className="prose prose-sm max-w-none bg-green-50 dark:bg-green-900/20 rounded p-2">
-                          <LatexRenderer content={d.answer} />
-                        </div>
-                      </div>
-                    )}
-                    {d.solution && (
-                      <div className="mb-2">
-                        <div className="text-xs text-gray-400 mb-1">解析过程</div>
-                        <div className="prose prose-sm max-w-none bg-blue-50 dark:bg-blue-900/20 rounded p-2">
-                          <LatexRenderer content={d.solution} />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <ExamDraftList
+        drafts={drafts}
+        expandedIdx={expandedDraft}
+        savingIdx={savingDraft}
+        onToggleExpand={idx => setExpandedDraft(expandedDraft === idx ? null : idx)}
+        onSave={handleSaveDraft}
+      />
 
       {/* Add form */}
       {showAdd && (
@@ -392,116 +312,24 @@ export default function ExamPractice() {
         </div>
       ) : (
         <div className="space-y-3">
-          {questions.map(q => {
-            const isExpanded = expandedId === q.id;
-            const isBusy = deletingId === q.id;
-            return (
-              <div key={q.id} className={`bg-white dark:bg-gray-800 rounded-xl shadow ${isBusy ? 'opacity-50' : ''}`}>
-                <div className="p-4 flex items-center justify-between cursor-pointer" onClick={() => { setExpandedId(isExpanded ? null : q.id); setUserAnswer(''); }}>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap mb-1">
-                      {q.subject && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{q.subject}</span>}
-                      {q.year && <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">{q.year}</span>}
-                      {q.tags && q.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
-                        <span key={tag} className="px-2 py-0.5 bg-purple-100 text-purple-600 rounded text-xs">{tag}</span>
-                      ))}
-                    </div>
-                    <div className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">{q.title}</div>
-                  </div>
-                  <div className="flex items-center gap-2 ml-3">
-                    <button
-                      onClick={e => { e.stopPropagation(); handleDelete(q.id); }}
-                      disabled={isBusy}
-                      className="text-red-400 hover:text-red-600 disabled:opacity-50 text-xs"
-                    >
-                      {isBusy ? '删除中...' : '删除'}
-                    </button>
-                    <span className="text-gray-400 text-xs">{isExpanded ? '▲' : '▼'}</span>
-                  </div>
-                </div>
-
-                {isExpanded && expandedQuestion && (
-                  <div className="px-4 pb-4 border-t">
-                    {/* Question content */}
-                    <div className="mt-3 mb-4">
-                      <div className="text-xs text-gray-400 mb-1">题目</div>
-                      <div className="prose prose-sm max-w-none bg-gray-50 dark:bg-gray-700 rounded p-3">
-                        <LatexRenderer content={expandedQuestion.question} />
-                      </div>
-                    </div>
-
-                    {/* Answer area */}
-                    {expandedQuestion.answer && !attempts[q.id]?.length && (
-                      <div className="mb-3">
-                        <div className="text-xs text-gray-400 mb-1">填写答案</div>
-                        <textarea
-                          className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none focus:outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
-                          placeholder="输入你的答案..."
-                          value={userAnswer}
-                          onChange={e => setUserAnswer(e.target.value)}
-                        />
-                        <button
-                          onClick={() => handleSubmit(q.id)}
-                          disabled={submitting}
-                          className="mt-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
-                        >
-                          {submitting ? '提交中...' : '提交答案'}
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Attempts history */}
-                    {attempts[q.id]?.length > 0 && (
-                      <div className="mb-3">
-                        <div className="text-xs text-gray-400 mb-1">我的作答</div>
-                        {attempts[q.id].map((a) => (
-                          <div key={a.id} className={`p-2 rounded text-sm mb-1 ${a.is_correct ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                            {a.user_answer || '（未填写答案）'}
-                            {a.is_correct ? ' ✓ 正确' : ' ✗ 不正确'}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Reference answer */}
-                    {expandedQuestion.answer && (
-                      <div className="mb-3">
-                        <div className="text-xs text-gray-400 mb-1">参考答案</div>
-                        <div className="prose prose-sm max-w-none bg-green-50 dark:bg-green-900/20 rounded p-3">
-                          <LatexRenderer content={expandedQuestion.answer} />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Solution */}
-                    {expandedQuestion.solution && (
-                      <div className="mb-3">
-                        <div className="text-xs text-gray-400 mb-1">解析过程</div>
-                        <div className="prose prose-sm max-w-none bg-blue-50 dark:bg-blue-900/20 rounded p-3">
-                          <LatexRenderer content={expandedQuestion.solution} />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Action buttons */}
-                    <div className="flex items-center gap-3 mt-3">
-                      <button
-                        onClick={() => handleAddToErrors(q.id)}
-                        disabled={addingToError === q.id || addedToError.has(q.id)}
-                        className={`px-4 py-1.5 rounded-lg text-sm ${
-                          addedToError.has(q.id)
-                            ? 'bg-green-100 text-green-700 cursor-default'
-                            : 'bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50'
-                        }`}
-                      >
-                        {addedToError.has(q.id) ? '已加入错题本' : addingToError === q.id ? '保存中...' : '加入错题本'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {questions.map(q => (
+            <ExamQuestionCard
+              key={q.id}
+              question={q}
+              expanded={expandedId === q.id}
+              busy={deletingId === q.id}
+              userAnswer={userAnswer}
+              submitting={submitting}
+              attempts={attempts[q.id] || []}
+              addedToError={addedToError.has(q.id)}
+              addingToError={addingToError === q.id}
+              onToggleExpand={() => { setExpandedId(expandedId === q.id ? null : q.id); setUserAnswer(''); }}
+              onUserAnswerChange={setUserAnswer}
+              onSubmit={() => handleSubmit(q.id)}
+              onDelete={() => handleDelete(q.id)}
+              onAddToErrors={() => handleAddToErrors(q.id)}
+            />
+          ))}
         </div>
       )}
     </div>
