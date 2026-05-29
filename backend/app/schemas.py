@@ -10,6 +10,7 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=5000)
     context: Optional[str] = None
+    conversation_id: Optional[str] = ""
 
 
 class ChatSource(BaseModel):
@@ -21,16 +22,25 @@ class ChatSource(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSource] = []
+    conversation_id: str = ""
 
 
 class ChatHistoryItem(BaseModel):
     id: int
+    conversation_id: str = ""
     question: str
     answer: str
     created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class ConversationItem(BaseModel):
+    conversation_id: str
+    title: str
+    message_count: int
+    last_message_at: Optional[datetime] = None
 
 
 # ── Material ──

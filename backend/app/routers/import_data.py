@@ -373,11 +373,11 @@ async def import_json(
                 # Chat history is immutable, skip on overwrite
                 skipped["chat_history"] += 1
             else:  # keep_both
-                rec = ChatHistory(question=_make_copy_name(q), answer=a)
+                rec = ChatHistory(question=_make_copy_name(q), answer=a, conversation_id=c.get("conversation_id", ""))
                 db.add(rec)
                 kept_both["chat_history"] += 1
         else:
-            rec = ChatHistory(question=q, answer=a)
+            rec = ChatHistory(question=q, answer=a, conversation_id=c.get("conversation_id", ""))
             db.add(rec)
             inserted["chat_history"] += 1
 

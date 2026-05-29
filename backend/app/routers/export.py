@@ -40,7 +40,7 @@ async def export_json(db: AsyncSession = Depends(get_db)):
     # Chat history
     chats = (await db.execute(select(ChatHistory).order_by(ChatHistory.id))).scalars().all()
     chat_history = [
-        {"id": c.id, "question": c.question, "answer": c.answer, "created_at": _dt(c.created_at)}
+        {"id": c.id, "conversation_id": c.conversation_id or "", "question": c.question, "answer": c.answer, "created_at": _dt(c.created_at)}
         for c in chats
     ]
 

@@ -4,6 +4,7 @@ import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/
 import FileUpload from '../components/FileUpload';
 import { useSafeAsync } from '../hooks/useSafeAsync';
 import { useDeepLink } from '../hooks/useDeepLink';
+import { downloadBlob } from '../utils/constants';
 
 function HighlightedSnippet({ text }: { text: string }): ReactNode {
   const parts: ReactNode[] = [];
@@ -213,12 +214,7 @@ export default function Materials() {
     try {
       const data = await exportSelectedMaterials(Array.from(selectedIds), true);
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `math_agent_materials_${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `math_agent_materials_${new Date().toISOString().slice(0, 10)}.json`);
     } catch (err) {
       setError(getApiErrorMessage(err, '导出失败，请检查后端服务。'));
     } finally {

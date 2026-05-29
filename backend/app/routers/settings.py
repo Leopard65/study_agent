@@ -1,9 +1,14 @@
 import json
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import AppSetting
+
+
+class ReviewSettingsUpdate(BaseModel):
+    intervals: list[int] = Field(..., min_length=1, max_length=10)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -28,14 +33,10 @@ async def read_review_settings(db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/review")
-async def update_review_settings(body: dict, db: AsyncSession = Depends(get_db)):
-    intervals = body.get("intervals")
-    if not isinstance(intervals, list) or len(intervals) == 0:
-        raise HTTPException(422, "intervals 必须是非空数组")
-    if len(intervals) > 10:
-        raise HTTPException(422, "intervals 最多 10 个元素")
+async def update_review_settings(body: ReviewSettingsUpdate, db: AsyncSession = Depends(get_db)):
+    intervals = body.intervals
     for v in intervals:
-        if not isinstance(v, int) or v < 1 or v > 365:
+        if v < 1 or v > 365:
             raise HTTPException(422, "每个间隔必须是 1-365 的正整数")
     for i in range(1, len(intervals)):
         if intervals[i] <= intervals[i - 1]:

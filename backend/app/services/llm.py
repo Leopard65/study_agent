@@ -14,11 +14,13 @@ class LLMCallError(Exception):
 
 def get_client() -> AsyncOpenAI:
     global _client
+    settings = get_settings()
     if _client is None:
-        settings = get_settings()
+        if not settings.openai_api_key.strip():
+            raise LLMConfigError("未配置 OPENAI_API_KEY，请在 backend/.env 中填写 API Key")
         _client = AsyncOpenAI(
             base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key or "placeholder",
+            api_key=settings.openai_api_key,
         )
     return _client
 
@@ -40,9 +42,16 @@ SYSTEM_PROMPT = (
 )
 
 
-async def chat(question: str, context: str | None = None) -> str:
+async def chat(
+    question: str,
+    context: str | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> str:
     model = _require_api_key()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # 加入对话历史
+    if history:
+        messages.extend(history)
     if context:
         messages.append({"role": "user", "content": f"参考资料：\n{context}\n\n我的问题：{question}"})
     else:

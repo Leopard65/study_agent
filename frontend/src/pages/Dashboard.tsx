@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { getDashboard, getDashboardTrends, listPlans, updatePlan, getActiveSession, startSession, stopSession, getApiErrorMessage } from '../api/client';
 import type { DashboardStats, StudyPlanItem, TrendDay, StudySessionItem } from '../api/client';
 import { formatLocalDate } from '../utils/date';
+import { useReviewTitle } from '../hooks/useDocumentTitle';
 
 export default function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -127,31 +128,36 @@ export default function Dashboard() {
     return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   };
 
+  useReviewTitle(stats?.today_review_errors ?? 0);
+
   if (!stats) return <div className="p-6 text-gray-400">加载中...</div>;
 
   const reviewCount = stats.today_review_errors;
 
   const cards = [
-    { label: '今日任务', value: `${stats.today_completed}/${stats.today_tasks}`, color: 'bg-blue-500' },
-    { label: '连续打卡', value: `${stats.streak_days} 天`, color: 'bg-green-500' },
-    { label: '今日复习', value: `${reviewCount} 题`, color: 'bg-orange-500' },
-    { label: '今日学习', value: `${stats.today_study_minutes} 分钟`, color: 'bg-indigo-500' },
-    { label: '未掌握错题', value: stats.unmastered_errors, color: 'bg-red-500' },
+    { label: '今日任务', value: `${stats.today_completed}/${stats.today_tasks}`, color: 'bg-blue-500', to: '/plan' as const },
+    { label: '连续打卡', value: `${stats.streak_days} 天`, color: 'bg-green-500', to: null },
+    { label: '今日复习', value: `${reviewCount} 题`, color: 'bg-orange-500', to: '/errors?filter=review' as const },
+    { label: '今日学习', value: `${stats.today_study_minutes} 分钟`, color: 'bg-indigo-500', to: null },
+    { label: '未掌握错题', value: stats.unmastered_errors, color: 'bg-red-500', to: '/errors' as const },
   ];
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <h1 className="text-2xl font-bold mb-6 dark:text-gray-100">学习工作台</h1>
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
-        {cards.map(c => (
-          <div key={c.label} className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
-            <div className={`w-10 h-10 ${c.color} rounded-lg flex items-center justify-center text-white text-lg mb-3`}>
-              {c.label[0]}
+        {cards.map(c => {
+          const card = (
+            <div className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${c.to ? 'cursor-pointer hover:shadow-md transition-shadow' : ''}`}>
+              <div className={`w-10 h-10 ${c.color} rounded-lg flex items-center justify-center text-white text-lg mb-3`}>
+                {c.label[0]}
+              </div>
+              <div className="text-2xl font-bold text-gray-800 dark:text-gray-100">{c.value}</div>
+              <div className="text-sm text-gray-500 dark:text-gray-400">{c.label}</div>
             </div>
-            <div className="text-2xl font-bold text-gray-800 dark:text-gray-100">{c.value}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">{c.label}</div>
-          </div>
-        ))}
+          );
+          return c.to ? <Link key={c.label} to={c.to} className="block">{card}</Link> : <div key={c.label}>{card}</div>;
+        })}
       </div>
       {/* Study timer */}
       <div id="study-timer" className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 mb-4">
@@ -247,15 +253,19 @@ export default function Dashboard() {
           <p className="text-gray-400 text-sm">加载中...</p>
         ) : trends.length === 0 ? (
           <p className="text-gray-400 text-sm">暂无数据</p>
-        ) : (
+        ) : (() => {
+          const maxPlans = Math.max(...trends.map(x => x.plans_total), 1);
+          const maxExam = Math.max(...trends.map(x => x.exam_attempts), 1);
+          const maxStudy = Math.max(...trends.map(x => x.study_minutes), 1);
+          const maxErrors = Math.max(...trends.map(x => x.errors_created + x.errors_review_due), 1);
+          return (
           <div className="space-y-4">
             {/* Plans chart */}
             <div>
               <div className="text-xs text-gray-500 mb-1.5">计划完成</div>
               <div className="flex items-end gap-1" style={{ height: 60 }}>
                 {trends.map(t => {
-                  const max = Math.max(...trends.map(x => x.plans_total), 1);
-                  const h = t.plans_total > 0 ? (t.plans_total / max) * 100 : 0;
+                  const h = t.plans_total > 0 ? (t.plans_total / maxPlans) * 100 : 0;
                   const doneH = t.plans_total > 0 ? (t.plans_completed / t.plans_total) * 100 : 0;
                   return (
                     <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: ${t.plans_completed}/${t.plans_total}`}>
@@ -280,8 +290,7 @@ export default function Dashboard() {
               <div className="text-xs text-gray-500 mb-1.5">真题练习</div>
               <div className="flex items-end gap-1" style={{ height: 60 }}>
                 {trends.map(t => {
-                  const max = Math.max(...trends.map(x => x.exam_attempts), 1);
-                  const h = t.exam_attempts > 0 ? (t.exam_attempts / max) * 100 : 0;
+                  const h = t.exam_attempts > 0 ? (t.exam_attempts / maxExam) * 100 : 0;
                   const correctH = t.exam_attempts > 0 ? (t.exam_correct / t.exam_attempts) * 100 : 0;
                   return (
                     <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: ${t.exam_correct}/${t.exam_attempts}`}>
@@ -306,8 +315,7 @@ export default function Dashboard() {
               <div className="text-xs text-gray-500 mb-1.5">学习时长（分钟）</div>
               <div className="flex items-end gap-1" style={{ height: 60 }}>
                 {trends.map(t => {
-                  const max = Math.max(...trends.map(x => x.study_minutes), 1);
-                  const h = t.study_minutes > 0 ? (t.study_minutes / max) * 100 : 0;
+                  const h = t.study_minutes > 0 ? (t.study_minutes / maxStudy) * 100 : 0;
                   return (
                     <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: ${t.study_minutes} 分钟`}>
                       <div className="w-full flex flex-col justify-end" style={{ height: 50 }}>
@@ -328,9 +336,8 @@ export default function Dashboard() {
               <div className="text-xs text-gray-500 mb-1.5">错题动态</div>
               <div className="flex items-end gap-1" style={{ height: 60 }}>
                 {trends.map(t => {
-                  const max = Math.max(...trends.map(x => x.errors_created + x.errors_review_due), 1);
-                  const createdH = t.errors_created > 0 ? (t.errors_created / max) * 100 : 0;
-                  const dueH = t.errors_review_due > 0 ? (t.errors_review_due / max) * 100 : 0;
+                  const createdH = t.errors_created > 0 ? (t.errors_created / maxErrors) * 100 : 0;
+                  const dueH = t.errors_review_due > 0 ? (t.errors_review_due / maxErrors) * 100 : 0;
                   return (
                     <div key={t.date} className="flex-1 flex flex-col items-center" title={`${t.date}: 新增${t.errors_created}, 待复习${t.errors_review_due}`}>
                       <div className="w-full flex flex-col justify-end" style={{ height: 50 }}>
@@ -348,7 +355,8 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

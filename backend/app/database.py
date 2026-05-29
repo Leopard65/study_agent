@@ -38,3 +38,9 @@ async def init_db():
         if "review_count" not in columns:
             await conn.execute(text("ALTER TABLE error_book ADD COLUMN review_count INTEGER DEFAULT 0"))
         await conn.execute(text("UPDATE error_book SET review_count = 0 WHERE review_count IS NULL"))
+        # Lightweight migration: add conversation_id to chat_history if missing
+        result = await conn.execute(text("PRAGMA table_info(chat_history)"))
+        columns = [row[1] for row in result.fetchall()]
+        if "conversation_id" not in columns:
+            await conn.execute(text("ALTER TABLE chat_history ADD COLUMN conversation_id VARCHAR(50) DEFAULT ''"))
+        await conn.execute(text("UPDATE chat_history SET conversation_id = '' WHERE conversation_id IS NULL"))

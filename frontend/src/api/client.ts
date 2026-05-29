@@ -12,13 +12,22 @@ export interface ChatSource {
 export interface ChatResponse {
   answer: string;
   sources: ChatSource[];
+  conversation_id: string;
 }
 
 export interface ChatHistoryItem {
   id: number;
+  conversation_id: string;
   question: string;
   answer: string;
   created_at: string | null;
+}
+
+export interface ConversationItem {
+  conversation_id: string;
+  title: string;
+  message_count: number;
+  last_message_at: string | null;
 }
 
 export interface MaterialItem {
@@ -123,11 +132,17 @@ export interface DashboardStats {
 }
 
 // ── Chat ──
-export const chat = (question: string, context?: string): Promise<ChatResponse> =>
-  api.post<ChatResponse>('/chat', { question, context }).then(r => r.data);
+export const chat = (question: string, context?: string, conversationId?: string): Promise<ChatResponse> =>
+  api.post<ChatResponse>('/chat', { question, context, conversation_id: conversationId }).then(r => r.data);
 
-export const getChatHistory = (): Promise<ChatHistoryItem[]> =>
-  api.get<ChatHistoryItem[]>('/chat/history').then(r => r.data);
+export const getChatHistory = (conversationId?: string): Promise<ChatHistoryItem[]> =>
+  api.get<ChatHistoryItem[]>('/chat/history', { params: conversationId ? { conversation_id: conversationId } : {} }).then(r => r.data);
+
+export const listConversations = (): Promise<ConversationItem[]> =>
+  api.get<ConversationItem[]>('/chat/conversations').then(r => r.data);
+
+export const deleteConversation = (conversationId: string): Promise<OkResponse> =>
+  api.delete<OkResponse>(`/chat/conversations/${conversationId}`).then(r => r.data);
 
 // ── Materials ──
 export const uploadMaterial = (file: File): Promise<MaterialItem> => {
