@@ -30,18 +30,21 @@ async def _exists(db: AsyncSession, model, *filters) -> object | None:
     return r.scalars().first()
 
 
-def _make_copy_name(base: str, suffix: str = "(副本)", max_len: int = 200) -> str:
+def _make_copy_name(base: str, suffix: str = "(副本)", max_len: int | None = None) -> str:
     """Generate a copy name like 'name (副本)' or 'name (副本2)'."""
     # If already has (副本N), increment
-    m = re.match(r"^(.*?)\s*\(副本(\d*)\)\s*$", base)
+    m = re.match(rf"^(.*?)\s*{re.escape(suffix[:-1])}(\d*)\)\s*$", base)
     if m:
         core = m.group(1)
         n = int(m.group(2)) + 1 if m.group(2) else 2
     else:
         core = base
         n = 0
-    result = f"{core} (副本)" if n == 0 else f"{core} (副本{n})"
-    return result[:max_len]
+    result = f"{core} {suffix}" if n == 0 else f"{core} {suffix[:-1]}{n})"
+    if max_len is not None and len(result) > max_len:
+        suffix_text = f" {suffix}" if n == 0 else f" {suffix[:-1]}{n})"
+        result = f"{core[:max(0, max_len - len(suffix_text))]}{suffix_text}"
+    return result
 
 
 _MAX_COPY_ITERATIONS = 1000
@@ -59,7 +62,7 @@ async def _next_copy_question(db: AsyncSession, base: str) -> str:
 
 async def _next_copy_title(db: AsyncSession, base: str) -> str:
     """Generate a unique title for keep_both."""
-    candidate = _make_copy_name(base)
+    candidate = _make_copy_name(base, max_len=500)
     for _ in range(_MAX_COPY_ITERATIONS):
         if not await _exists(db, ExamQuestion, ExamQuestion.title == candidate):
             return candidate
@@ -250,7 +253,7 @@ async def import_json(
                 existing.stored_filename = ""
                 overwritten["materials"] += 1
             else:  # keep_both
-                rec = Material(filename=_make_copy_name(fn), file_type=ft, content="", stored_filename="")
+                rec = Material(filename=_make_copy_name(fn, max_len=500), file_type=ft, content="", stored_filename="")
                 db.add(rec)
                 kept_both["materials"] += 1
         else:

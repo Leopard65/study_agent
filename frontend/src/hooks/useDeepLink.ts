@@ -16,7 +16,9 @@ export function useDeepLink(onOpen: (id: number) => void) {
       if (!isNaN(id)) {
         setTimeout(() => {
           onOpen(id);
-          setSearchParams({}, { replace: true });
+          const next = new URLSearchParams(searchParams);
+          next.delete('open');
+          setSearchParams(next, { replace: true });
         }, 0);
       }
     }

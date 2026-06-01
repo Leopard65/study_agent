@@ -46,6 +46,7 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
 
 /** 发送本地通知（用于错题复习提醒） */
 export function sendReviewNotification(dueCount: number) {
+  if (!('Notification' in window)) return;
   if (Notification.permission !== 'granted') return;
   new Notification('考研学习助手', {
     body: `你有 ${dueCount} 道错题需要复习`,

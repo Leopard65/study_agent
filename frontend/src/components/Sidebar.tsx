@@ -100,7 +100,7 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
 
   const handleStrategyChange = async (newStrategy: 'skip' | 'overwrite' | 'keep_both') => {
     setImportStrategy(newStrategy);
-    if (importData && preview) {
+    if (importData) {
       setPreviewLoading(true);
       const reqId = ++previewRequestId.current;
       try {

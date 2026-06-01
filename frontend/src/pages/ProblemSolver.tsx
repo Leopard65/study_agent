@@ -8,6 +8,7 @@ export default function ProblemSolver() {
   const [question, setQuestion] = useState('');
   const [subject, setSubject] = useState('');
   const [solution, setSolution] = useState('');
+  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -18,11 +19,13 @@ export default function ProblemSolver() {
     setLoading(true);
     setSaved(false);
     setSaveError('');
+    setError('');
     try {
       const res = await solveProblem(question, subject);
       setSolution(res.solution);
     } catch (err) {
-      setSolution(getApiErrorMessage(err, '请求失败，请检查后端服务是否运行。'));
+      setSolution('');
+      setError(getApiErrorMessage(err, '请求失败，请检查后端服务是否运行。'));
     } finally {
       setLoading(false);
     }
@@ -57,7 +60,7 @@ export default function ProblemSolver() {
           <select
             className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
             value={subject}
-            onChange={e => { setSubject(e.target.value); setSaved(false); setSaveError(''); }}
+            onChange={e => { setSubject(e.target.value); setSaved(false); setSaveError(''); setError(''); }}
           >
             <option value="">自动判断</option>
             {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
@@ -69,7 +72,7 @@ export default function ProblemSolver() {
             className="w-full border rounded-lg px-3 py-2 text-sm h-32 resize-none focus:outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
             placeholder="输入题目，支持 LaTeX 格式，例如：求 $\int_0^1 x^2 dx$"
             value={question}
-            onChange={e => { setQuestion(e.target.value); setSaved(false); setSaveError(''); }}
+            onChange={e => { setQuestion(e.target.value); setSaved(false); setSaveError(''); setError(''); }}
           />
         </div>
         <button
@@ -80,6 +83,12 @@ export default function ProblemSolver() {
           {loading ? '解析中...' : '开始解析'}
         </button>
       </div>
+
+      {error && (
+        <div className="mb-6 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      )}
 
       {solution && (
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">

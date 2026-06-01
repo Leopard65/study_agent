@@ -59,6 +59,13 @@ export default function CommandPalette({ open, onClose, onExport }: Props) {
   }, [selected]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (filtered.length === 0) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+      return;
+    }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setSelected(i => (i + 1) % filtered.length);

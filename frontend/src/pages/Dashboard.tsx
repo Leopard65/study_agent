@@ -145,7 +145,7 @@ export default function Dashboard() {
     if (due > 0 && 'Notification' in window && Notification.permission === 'default') {
       requestNotificationPermission();
     }
-    if (due > 0 && Notification.permission === 'granted' && !sessionStorage.getItem('review_notified')) {
+    if (due > 0 && 'Notification' in window && Notification.permission === 'granted' && !sessionStorage.getItem('review_notified')) {
       sendReviewNotification(due);
       sessionStorage.setItem('review_notified', '1');
     }
