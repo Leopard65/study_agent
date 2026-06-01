@@ -47,7 +47,7 @@ class ParseWorker:
             await session.execute(
                 update(MaterialParseJob)
                 .where(MaterialParseJob.status == "processing")
-                .values(status="pending", started_at=None)
+                .values(status="pending", started_at=None, progress_current=0, progress_total=0, progress_message="")
             )
             # 同步 materials 表：processing → pending
             await session.execute(
@@ -108,6 +108,16 @@ class ParseWorker:
         async with self._semaphore:
             await self._process_one(material_id)
 
+    async def _update_progress(self, job_id: int, current: int, total: int, message: str) -> None:
+        """更新 job 的进度字段（轻量，不改 status）。"""
+        async with async_session() as session:
+            job = await session.get(MaterialParseJob, job_id)
+            if job and job.status == "processing":
+                job.progress_current = current
+                job.progress_total = total
+                job.progress_message = message
+                await session.commit()
+
     async def _process_one(self, material_id: int) -> None:
         """处理单个 material 的解析任务。"""
         # 查找 pending job
@@ -128,16 +138,22 @@ class ParseWorker:
             job.status = "processing"
             job.started_at = _utcnow()
             job.attempts += 1
+            job.progress_current = 0
+            job.progress_total = 4  # 4 阶段：读取→提取→索引→完成
+            job.progress_message = "等待中"
             material = await session.get(Material, material_id)
             if not material:
                 job.status = "failed"
                 job.error_message = "资料记录不存在"
+                job.progress_message = "失败：资料记录不存在"
                 job.finished_at = _utcnow()
                 await session.commit()
                 return
             material.status = "processing"
             file_path = material.stored_filename or ""
             await session.commit()
+
+        job_id = job.id
 
         # 构建完整文件路径
         from app.config import get_settings
@@ -146,12 +162,18 @@ class ParseWorker:
         full_path = os.path.join(settings.upload_dir, file_path) if file_path else ""
 
         try:
+            # 阶段 1：读取文件
+            await self._update_progress(job_id, 1, 4, "正在读取文件")
             if not full_path or not os.path.isfile(full_path):
                 raise FileNotFoundError(f"存储文件不存在: {file_path}")
 
+            # 阶段 2：提取文本（可能含 OCR）
+            await self._update_progress(job_id, 2, 4, "正在提取文本")
             loop = asyncio.get_running_loop()
             text_content = await loop.run_in_executor(None, extract_text, full_path)
 
+            # 阶段 3：写入索引
+            await self._update_progress(job_id, 3, 4, "正在写入索引")
             async with async_session() as session:
                 material = await session.get(Material, material_id)
                 if not material:
@@ -163,11 +185,14 @@ class ParseWorker:
                 material.status = "ready"
                 material.error_message = ""
 
-                # 更新 job 状态
-                job = await session.get(MaterialParseJob, job.id)
+                # 阶段 4：完成
+                job = await session.get(MaterialParseJob, job_id)
                 if job:
                     job.status = "done"
                     job.error_message = ""
+                    job.progress_current = 4
+                    job.progress_total = 4
+                    job.progress_message = "已完成"
                     job.finished_at = _utcnow()
 
                 await session.commit()
@@ -180,10 +205,11 @@ class ParseWorker:
                 if material:
                     material.status = "failed"
                     material.error_message = str(e)[:500]
-                job = await session.get(MaterialParseJob, job.id)
+                job = await session.get(MaterialParseJob, job_id)
                 if job:
                     job.status = "failed"
                     job.error_message = str(e)[:500]
+                    job.progress_message = f"失败：{str(e)[:100]}"
                     job.finished_at = _utcnow()
                 await session.commit()
 

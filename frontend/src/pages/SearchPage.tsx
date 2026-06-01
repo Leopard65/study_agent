@@ -107,6 +107,46 @@ export default function SearchPage() {
     }
   }, []);
 
+  const restoreSearchFromUrl = useCallback(async (
+    q: string,
+    types: Set<string>,
+    savedOffset: number,
+    reqId: number,
+  ) => {
+    if (!q.trim()) return;
+    setLoading(true);
+    setError('');
+    setSearched(true);
+    try {
+      const t = types.size > 0 ? [...types].join(',') : undefined;
+      const targetOffset = Math.floor(Math.max(0, savedOffset) / PAGE_SIZE) * PAGE_SIZE;
+      const restored: SearchResult[] = [];
+      let restoredTotal = 0;
+
+      for (let currentOffset = 0; currentOffset <= targetOffset; currentOffset += PAGE_SIZE) {
+        const resp = await globalSearch(q.trim(), t, PAGE_SIZE, currentOffset);
+        if (reqId !== requestIdRef.current) return;
+        restored.push(...resp.results);
+        restoredTotal = resp.total;
+        if (resp.results.length < PAGE_SIZE || restored.length >= resp.total) break;
+      }
+
+      setResults(restored);
+      setTotal(restoredTotal);
+      setOffset(restored.length);
+      saveToHistory(q.trim());
+      setHistory(loadHistory());
+    } catch (err) {
+      if (reqId !== requestIdRef.current) return;
+      setError(getApiErrorMessage(err, '搜索失败，请检查后端服务。'));
+    } finally {
+      if (reqId === requestIdRef.current) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    }
+  }, []);
+
   // 新搜索（重置分页）
   const handleSearch = () => {
     const reqId = ++requestIdRef.current;
@@ -197,23 +237,22 @@ export default function SearchPage() {
     const q = urlParams.get('q');
     if (q) {
       const savedOffset = parseInt(urlParams.get('offset') || '0', 10) || 0;
-      if (savedOffset > 0) {
-        // 恢复分页：先搜索第一页，再加载更多到保存的偏移量
-        const reqId = ++requestIdRef.current;
-        doSearch(q, activeTypes, reqId, false, 0).then(() => {
-          // 如果保存的 offset > PAGE_SIZE，后续加载由用户点击"加载更多"
-        });
-      } else {
-        const reqId = ++requestIdRef.current;
-        doSearch(q, activeTypes, reqId, false, 0);
-      }
+      const reqId = ++requestIdRef.current;
+      restoreSearchFromUrl(q, activeTypes, savedOffset, reqId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleClick = (r: SearchResult) => {
     const cfg = TYPE_CONFIG[r.type];
-    if (cfg?.path) navigate(`${cfg.path}?open=${r.id}`);
+    if (cfg?.path) {
+      let url = `${cfg.path}?open=${r.id}`;
+      // 资料结果带上搜索词，用于资料内搜索定位
+      if (r.type === 'material' && query.trim()) {
+        url += `&q=${encodeURIComponent(query.trim())}`;
+      }
+      navigate(url);
+    }
   };
 
   // 按类型分组统计

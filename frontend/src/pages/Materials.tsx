@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, retryMaterial, getApiErrorMessage } from '../api/client';
-import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
+import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, retryMaterial, listParseJobs, cancelParseJob, getApiErrorMessage } from '../api/client';
+import type { MaterialItem, MaterialDetail, MaterialSearchResult, ParseJobItem } from '../api/client';
 import FileUpload from '../components/FileUpload';
 import MaterialDetailModal from '../components/MaterialDetailModal';
 import { useSafeAsync } from '../hooks/useSafeAsync';
@@ -58,6 +58,7 @@ export default function Materials() {
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialDetail | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState<number | null>(null);
   const [detailError, setDetailError] = useState('');
+  const [detailInitialQuery, setDetailInitialQuery] = useState('');
 
   // Bulk operations
   const [selectMode, setSelectMode] = useState(false);
@@ -68,9 +69,38 @@ export default function Materials() {
   // Retry
   const [retryingId, setRetryingId] = useState<number | null>(null);
 
-  // Polling for pending/processing materials
+  // Parse jobs
+  const [parseJobs, setParseJobs] = useState<ParseJobItem[]>([]);
+  const [showJobs, setShowJobs] = useState(false);
+  const [cancellingJobId, setCancellingJobId] = useState<number | null>(null);
+
+  // Polling for pending/processing materials and parse jobs
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const jobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refreshJobs = useCallback(async () => {
+    try {
+      const jobs = await listParseJobs({ limit: 30 });
+      setParseJobs(jobs);
+      return jobs;
+    } catch { return []; }
+  }, []);
+
   const startPolling = useCallback(() => {
+    refreshJobs();
+    if (!jobPollRef.current) {
+      jobPollRef.current = setInterval(async () => {
+        try {
+          const jobs = await listParseJobs({ limit: 30 });
+          setParseJobs(jobs);
+          const hasActiveJob = jobs.some(j => j.status === 'pending' || j.status === 'processing');
+          if (!hasActiveJob && jobPollRef.current) {
+            clearInterval(jobPollRef.current);
+            jobPollRef.current = null;
+          }
+        } catch { /* ignore */ }
+      }, 2000);
+    }
     if (pollRef.current) return;
     pollRef.current = setInterval(async () => {
       try {
@@ -79,7 +109,6 @@ export default function Materials() {
           const map = new Map(items.map(m => [m.id, m]));
           return prev.map(m => map.get(m.id) || m);
         });
-        // 如果没有 pending/processing 的材料了，停止轮询
         const hasActive = items.some(m => m.status === 'pending' || m.status === 'processing');
         if (!hasActive && pollRef.current) {
           clearInterval(pollRef.current);
@@ -87,15 +116,20 @@ export default function Materials() {
         }
       } catch { /* ignore poll errors */ }
     }, 2000);
-  }, []);
+  }, [refreshJobs]);
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    if (jobPollRef.current) {
+      clearInterval(jobPollRef.current);
+      jobPollRef.current = null;
+    }
   }, []);
   useEffect(() => stopPolling, [stopPolling]);
 
+  const jobsLoadedRef = useRef(false);
   useEffect(() => {
     run(() => fetchFirstMaterials()).then(items => {
       if (items !== undefined) {
@@ -107,8 +141,17 @@ export default function Materials() {
     }).finally(() => {
       setLoadingMaterials(false);
     });
+    // 加载初始解析任务列表（仅一次）
+    if (!jobsLoadedRef.current) {
+      jobsLoadedRef.current = true;
+      listParseJobs({ limit: 30 }).then(jobs => {
+        setParseJobs(jobs);
+        const hasActive = jobs.some(j => j.status === 'pending' || j.status === 'processing');
+        if (hasActive) startPolling();
+      }).catch(() => {});
+    }
     return cancel;
-  }, [run, cancel]);
+  }, [run, cancel, startPolling]);
 
   const loadFirstPage = useCallback(async () => {
     setLoadingMaterials(true);
@@ -174,9 +217,10 @@ export default function Materials() {
     setHasSearched(false);
   };
 
-  const handleViewDetail = async (id: number) => {
+  const handleViewDetail = async (id: number, initialQuery?: string) => {
     setDetailError('');
     setDetailLoadingId(id);
+    setDetailInitialQuery(initialQuery || '');
     try {
       const detail = await getMaterial(id);
       setSelectedMaterial(detail);
@@ -187,8 +231,8 @@ export default function Materials() {
     }
   };
 
-  // Deep link: auto-open material detail
-  useDeepLink((id) => handleViewDetail(id).catch(() => {}));
+  // Deep link: auto-open material detail (supports ?open=id&q=query)
+  useDeepLink((id, q) => handleViewDetail(id, q).catch(() => {}));
 
   const handleDelete = async (id: number) => {
     if (deletingId === id) return;
@@ -269,11 +313,33 @@ export default function Materials() {
     try {
       const updated = await retryMaterial(id);
       setMaterials(prev => prev.map(m => m.id === id ? { ...m, ...updated } : m));
+      await refreshJobs();
       startPolling();
     } catch (err) {
       setError(getApiErrorMessage(err, '重试失败，请检查后端服务。'));
     } finally {
       setRetryingId(null);
+    }
+  };
+
+  const handleCancelJob = async (jobId: number) => {
+    if (cancellingJobId === jobId) return;
+    setError('');
+    setCancellingJobId(jobId);
+    try {
+      await cancelParseJob(jobId);
+      await refreshJobs();
+      // 同步更新 materials 列表中对应 material 的状态
+      const job = parseJobs.find(j => j.id === jobId);
+      if (job) {
+        setMaterials(prev => prev.map(m =>
+          m.id === job.material_id ? { ...m, status: 'failed', error_message: '任务已取消' } : m
+        ));
+      }
+    } catch (err) {
+      setError(getApiErrorMessage(err, '取消任务失败。'));
+    } finally {
+      setCancellingJobId(null);
     }
   };
 
@@ -346,6 +412,94 @@ export default function Materials() {
         </div>
       )}
 
+      {/* Parse Jobs Section */}
+      {parseJobs.length > 0 && (
+        <div className="mb-6">
+          <button
+            onClick={() => setShowJobs(v => !v)}
+            className="flex items-center gap-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 mb-2"
+          >
+            <span>{showJobs ? '▼' : '▶'}</span>
+            解析任务（{parseJobs.length}）
+            {parseJobs.some(j => j.status === 'pending' || j.status === 'processing') && (
+              <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+            )}
+          </button>
+          {showJobs && (
+            <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 space-y-2">
+              {parseJobs.map(j => {
+                const JOB_STATUS: Record<string, { label: string; color: string }> = {
+                  pending: { label: '等待中', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300' },
+                  processing: { label: '处理中', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
+                  done: { label: '已完成', color: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' },
+                  failed: { label: '失败', color: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+                  cancelled: { label: '已取消', color: 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400' },
+                };
+                const st = JOB_STATUS[j.status] || JOB_STATUS.done;
+                const rawProgressPct = j.progress_total > 0 ? Math.round((j.progress_current / j.progress_total) * 100) : 0;
+                const progressPct = Math.min(100, Math.max(0, rawProgressPct));
+                const showProgress = j.status === 'processing' && j.progress_total > 0;
+                const progressMsg = j.progress_message || (j.status === 'pending' ? '等待中' : '');
+                return (
+                  <div key={j.id} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`px-1.5 py-0.5 rounded ${st.color}`}>{st.label}</span>
+                        <span className="text-gray-700 dark:text-gray-300 truncate">{j.filename || `#${j.material_id}`}</span>
+                        {j.attempts > 0 && <span className="text-gray-400">尝试 {j.attempts}</span>}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {progressMsg && !showProgress && (
+                          <span className="text-gray-400">{progressMsg}</span>
+                        )}
+                        {j.error_message && (
+                          <span className="text-red-400 truncate max-w-[200px]" title={j.error_message}>{j.error_message}</span>
+                        )}
+                        {j.created_at && (
+                          <span className="text-gray-400">{new Date(j.created_at).toLocaleTimeString()}</span>
+                        )}
+                        {j.status === 'pending' && (
+                          <button
+                            onClick={() => handleCancelJob(j.id)}
+                            disabled={cancellingJobId === j.id}
+                            className="text-red-400 hover:text-red-600 disabled:opacity-50"
+                          >
+                            {cancellingJobId === j.id ? '取消中...' : '取消'}
+                          </button>
+                        )}
+                        {j.status === 'processing' && (
+                          <span className="text-blue-400 text-[10px]" title="正在解析中，暂不支持中断">无法取消</span>
+                        )}
+                        {j.status === 'failed' && (
+                          <button
+                            onClick={() => handleRetry(j.material_id)}
+                            disabled={retryingId === j.material_id}
+                            className="text-orange-500 hover:text-orange-700 disabled:opacity-50"
+                          >
+                            {retryingId === j.material_id ? '重试中...' : '重试'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {showProgress && (
+                      <div className="flex items-center gap-2 pl-1">
+                        <div className="flex-1 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] text-gray-400 shrink-0">{progressMsg}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Search Results */}
       {hasSearched && (
         <div className="mb-6">
@@ -355,10 +509,14 @@ export default function Materials() {
           ) : (
             <div className="space-y-2">
               {results.map(r => (
-                <div key={r.material_id} className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm">
-                  <div className="font-medium text-gray-700">{r.filename}</div>
-                  <div className="text-gray-500 mt-1"><HighlightedSnippet text={r.snippet} /></div>
-                </div>
+                <button
+                  key={r.material_id}
+                  onClick={() => handleViewDetail(r.material_id, query)}
+                  className="w-full text-left bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 text-sm hover:bg-yellow-100 dark:hover:bg-yellow-900/30 transition-colors"
+                >
+                  <div className="font-medium text-gray-700 dark:text-gray-300">{r.filename}</div>
+                  <div className="text-gray-500 dark:text-gray-400 mt-1"><HighlightedSnippet text={r.snippet} /></div>
+                </button>
               ))}
             </div>
           )}
@@ -460,7 +618,7 @@ export default function Materials() {
 
       {/* Detail Modal */}
       {selectedMaterial && (
-        <MaterialDetailModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
+        <MaterialDetailModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} initialQuery={detailInitialQuery} />
       )}
     </div>
   );

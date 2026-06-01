@@ -1820,6 +1820,88 @@ def run(client: TestClient):
     for eid in stats_errs:
         client.delete(f"/api/errors/{eid}")
 
+    # ── 28. Material chunks endpoint ──
+    print("\n[28] GET /api/materials/{id}/chunks")
+    # Upload a material with known content for chunk testing
+    chunk_content = "第一段内容用于测试分块功能。\n\n第二段内容包含卷积定理的相关描述。\n\n第三段内容涉及傅里叶变换的基本概念。\n\n" + "第四段较长内容 " * 50
+    chunk_content += "\nenglish test marker for fts path"
+    chunk_file = os.path.join(_tmp_dir, "chunk_test.txt")
+    with open(chunk_file, "w", encoding="utf-8") as f:
+        f.write(chunk_content)
+    with open(chunk_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("chunk_test.txt", f, "text/plain")})
+    check("chunk material upload 200", r.status_code == 200)
+    chunk_mat_id = r.json()["id"]
+
+    # Wait for parsing
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{chunk_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("chunk material parsed", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Basic chunks listing
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks")
+    check("chunks list 200", r.status_code == 200, f"got {r.status_code}")
+    chunks_list = r.json()
+    check("chunks is list", isinstance(chunks_list, list))
+    check("chunks has items", len(chunks_list) > 0, f"count={len(chunks_list)}")
+    if chunks_list:
+        c0 = chunks_list[0]
+        check("chunk has id", "id" in c0)
+        check("chunk has chunk_index", "chunk_index" in c0)
+        check("chunk has content", "content" in c0)
+        check("chunk has snippet", "snippet" in c0)
+        check("chunk_index starts at 0", c0["chunk_index"] == 0, f"got {c0['chunk_index']}")
+        check("chunk content not empty", len(c0["content"]) > 0)
+
+    # Pagination: limit=1
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"limit": 1})
+    check("chunks limit=1 200", r.status_code == 200)
+    check("chunks limit=1 returns 1", len(r.json()) == 1, f"got {len(r.json())}")
+
+    # Pagination: offset
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"limit": 1, "offset": 1})
+    check("chunks offset=1 200", r.status_code == 200)
+    if len(chunks_list) > 1:
+        check("chunks offset returns different chunk", r.json()[0]["chunk_index"] == 1, f"got {r.json()[0]['chunk_index']}")
+
+    # Query search within material
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"query": "卷积定理"})
+    check("chunks query 200", r.status_code == 200)
+    query_results = r.json()
+    check("query found chunks", len(query_results) > 0, f"count={len(query_results)}")
+    if query_results:
+        check("query chunk has snippet", len(query_results[0]["snippet"]) > 0)
+        # Snippet should contain the query or highlight markers
+        snippet_text = query_results[0]["snippet"]
+        has_markers = ">>>" in snippet_text and "<<<" in snippet_text
+        check("query snippet contains highlight markers", has_markers, f"snippet={snippet_text[:80]}")
+
+    # Query with English text (FTS5 path)
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"query": "test"})
+    check("chunks english query 200", r.status_code == 200)
+    english_results = r.json()
+    check("english query found chunks", len(english_results) > 0, f"count={len(english_results)}")
+    if english_results:
+        check("english query snippet highlighted", ">>>test<<<" in english_results[0]["snippet"], f"snippet={english_results[0]['snippet']}")
+
+    # Non-existent material
+    r = client.get("/api/materials/999999/chunks")
+    check("chunks nonexistent 404", r.status_code == 404, f"got {r.status_code}")
+
+    # Invalid limit/offset
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"limit": 0})
+    check("chunks limit=0 clamped", r.status_code == 200)  # clamped to 1
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"limit": 200})
+    check("chunks limit=200 clamped", r.status_code == 200)  # clamped to 100
+    r = client.get(f"/api/materials/{chunk_mat_id}/chunks", params={"offset": -1})
+    check("chunks negative offset clamped", r.status_code == 200)  # clamped to 0
+
+    # Cleanup
+    client.delete(f"/api/materials/{chunk_mat_id}")
+
     # ── 25. Parse job: startup recovery logic ──
     print("\n[25] Parse job: startup recovery logic")
     # Upload a material, wait for it to finish, then simulate a stuck "processing" state
@@ -1967,6 +2049,277 @@ def run(client: TestClient):
     # Cleanup
     for mid in conc_ids:
         client.delete(f"/api/materials/{mid}")
+
+    # ── 27. Parse job: list, cancel, and lifecycle ──
+    print("\n[27] GET /api/materials/jobs (list parse jobs)")
+    r = client.get("/api/materials/jobs")
+    check("jobs list 200", r.status_code == 200, f"got {r.status_code}")
+    jobs_list = r.json()
+    check("jobs list is list", isinstance(jobs_list, list))
+    # There should be completed jobs from previous tests
+    check("jobs list has items", len(jobs_list) > 0, f"count={len(jobs_list)}")
+    # Verify schema fields
+    if jobs_list:
+        j0 = jobs_list[0]
+        check("job has id", "id" in j0)
+        check("job has material_id", "material_id" in j0)
+        check("job has filename", "filename" in j0)
+        check("job has status", "status" in j0)
+        check("job has attempts", "attempts" in j0)
+        check("job has error_message", "error_message" in j0)
+        check("job has progress_current", "progress_current" in j0)
+        check("job has progress_total", "progress_total" in j0)
+        check("job has progress_message", "progress_message" in j0)
+        check("job has created_at", "created_at" in j0)
+        check("job has started_at", "started_at" in j0)
+        check("job has finished_at", "finished_at" in j0)
+
+    # Filter by status
+    print("\n[27b] GET /api/materials/jobs?status=done")
+    r = client.get("/api/materials/jobs", params={"status": "done"})
+    check("jobs filter done 200", r.status_code == 200)
+    done_jobs = r.json()
+    check("all filtered jobs are done", all(j["status"] == "done" for j in done_jobs), f"statuses={set(j['status'] for j in done_jobs)}")
+
+    print("\n[27c] GET /api/materials/jobs?status=pending")
+    r = client.get("/api/materials/jobs", params={"status": "pending"})
+    check("jobs filter pending 200", r.status_code == 200)
+    pending_jobs = r.json()
+    check("all filtered jobs are pending", all(j["status"] == "pending" for j in pending_jobs))
+
+    r = client.get("/api/materials/jobs", params={"status": "invalid"})
+    check("jobs invalid status 422", r.status_code == 422, f"got {r.status_code}")
+
+    # ── 27h. Progress fields: completed jobs have final progress ──
+    print("\n[27h] Progress fields on completed jobs")
+    r = client.get("/api/materials/jobs", params={"status": "done"})
+    check("progress done jobs 200", r.status_code == 200)
+    done_progress_jobs = r.json()
+    if done_progress_jobs:
+        dp = done_progress_jobs[0]
+        check("done job progress_current=4", dp["progress_current"] == 4, f"got {dp['progress_current']}")
+        check("done job progress_total=4", dp["progress_total"] == 4, f"got {dp['progress_total']}")
+        check("done job progress_message=已完成", dp["progress_message"] == "已完成", f"got {dp['progress_message']}")
+    else:
+        print("  SKIP  no done jobs to check progress")
+
+    # ── 27i. Progress on failed jobs ──
+    print("\n[27i] Progress fields on failed jobs")
+    # Create a material with a file, set it to failed, check progress_message
+    fail_progress_file = os.path.join(_tmp_dir, "fail_progress.txt")
+    with open(fail_progress_file, "w", encoding="utf-8") as f:
+        f.write("失败进度测试")
+    with open(fail_progress_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("fail_progress.txt", f, "text/plain")})
+    check("fail progress upload 200", r.status_code == 200)
+    fp_mat_id = r.json()["id"]
+
+    # Wait for it to finish
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{fp_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("fail progress material ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Simulate failure by deleting the file and retrying
+    async def set_failed_for_progress(mid):
+        async with async_session() as session:
+            await session.execute(text(
+                "UPDATE materials SET status='failed', error_message='进度测试失败' WHERE id=:mid"
+            ), {"mid": mid})
+            # Also create a failed job with progress_message
+            await session.execute(text(
+                "INSERT INTO material_parse_jobs (material_id, status, attempts, error_message, progress_message, created_at) "
+                "VALUES (:mid, 'failed', 1, '进度测试失败', '失败：进度测试失败', datetime('now'))"
+            ), {"mid": mid})
+            await session.commit()
+
+    loop_fp = asyncio.new_event_loop()
+    loop_fp.run_until_complete(set_failed_for_progress(fp_mat_id))
+    loop_fp.close()
+
+    r = client.get("/api/materials/jobs", params={"status": "failed"})
+    check("failed jobs 200", r.status_code == 200)
+    failed_jobs = r.json()
+    fp_found = [j for j in failed_jobs if j["material_id"] == fp_mat_id]
+    if fp_found:
+        check("failed job has progress_message", "失败" in fp_found[0]["progress_message"], f"got {fp_found[0]['progress_message']}")
+        check("failed job error_message matches", "进度测试失败" in fp_found[0]["error_message"], f"got {fp_found[0]['error_message']}")
+
+    # Cleanup
+    client.delete(f"/api/materials/{fp_mat_id}")
+
+    # ── 27d. Cancel a pending job ──
+    print("\n[27d] Cancel a pending job")
+    # Upload a material and create a pending job for it before the worker processes it
+    cancel_file = os.path.join(_tmp_dir, "cancel_test.txt")
+    with open(cancel_file, "w", encoding="utf-8") as f:
+        f.write("取消测试内容")
+
+    # Create material + pending job directly in DB (bypass worker) to test cancel
+    async def create_material_with_pending_job():
+        async with async_session() as session:
+            from app.models import Material as M
+            mat = M(filename="cancel_test.txt", file_type=".txt", content="",
+                     stored_filename="cancel_test_stored.txt", status="pending", error_message="")
+            session.add(mat)
+            await session.flush()
+            mat_id = mat.id
+            await session.execute(text(
+                "INSERT INTO material_parse_jobs (material_id, status, attempts, created_at) VALUES (:mat_id, 'pending', 0, datetime('now'))"
+            ), {"mat_id": mat_id})
+            await session.commit()
+            # Get the job id
+            r = await session.execute(text(
+                "SELECT id FROM material_parse_jobs WHERE material_id=:mat_id AND status='pending' ORDER BY id DESC LIMIT 1"
+            ), {"mat_id": mat_id})
+            job_id = r.scalar()
+            return mat_id, job_id
+
+    loop_cpj = asyncio.new_event_loop()
+    cancel_mat_id, cancel_job_id = loop_cpj.run_until_complete(create_material_with_pending_job())
+    loop_cpj.close()
+    check("created pending job for cancel test", cancel_job_id is not None)
+
+    # Cancel it
+    r = client.post(f"/api/materials/jobs/{cancel_job_id}/cancel")
+    check("cancel pending job 200", r.status_code == 200, f"got {r.status_code}")
+    check("cancel returns ok", r.json().get("ok") is True)
+    check("cancel returns cancelled status", r.json().get("status") == "cancelled", f"got {r.json().get('status')}")
+
+    # Verify job is now cancelled
+    r = client.get("/api/materials/jobs", params={"status": "cancelled"})
+    cancelled_jobs = [j for j in r.json() if j["id"] == cancel_job_id]
+    check("cancelled job appears in cancelled filter", len(cancelled_jobs) == 1, f"found={len(cancelled_jobs)}")
+
+    # Verify material status is failed (with "任务已取消" message) since material was pending
+    r = client.get(f"/api/materials/{cancel_mat_id}")
+    check("cancelled material status failed", r.json().get("status") == "failed", f"got {r.json().get('status')}")
+    check("cancelled material error_message", "已取消" in r.json().get("error_message", ""), f"msg={r.json().get('error_message')}")
+
+    # ── 27e. Cancel on non-pending job returns 422 ──
+    print("\n[27e] Cancel on non-pending job returns 422")
+    # Find a done job
+    r = client.get("/api/materials/jobs", params={"status": "done"})
+    done_jobs_for_cancel = r.json()
+    if done_jobs_for_cancel:
+        done_job_id = done_jobs_for_cancel[0]["id"]
+        r = client.post(f"/api/materials/jobs/{done_job_id}/cancel")
+        check("cancel done job 422", r.status_code == 422, f"got {r.status_code}")
+        detail = r.json().get("detail", "")
+        check("cancel 422 mentions status", "done" in detail or "不支持取消" in detail or "暂不支持中断" in detail, f"detail={detail}")
+
+    # Cancel on nonexistent job
+    r = client.post("/api/materials/jobs/999999/cancel")
+    check("cancel nonexistent job 404", r.status_code == 404, f"got {r.status_code}")
+
+    # ── 27f. Cancelled job is not processed by worker ──
+    print("\n[27f] Cancelled job not processed by worker")
+    # Create a pending job for a material that's already ready, cancel it, verify worker doesn't re-process
+    cancel_file2 = os.path.join(_tmp_dir, "cancel_no_process.txt")
+    with open(cancel_file2, "w", encoding="utf-8") as f:
+        f.write("取消后不处理测试")
+    with open(cancel_file2, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("cancel_no_process.txt", f, "text/plain")})
+    check("cancel2 upload 200", r.status_code == 200)
+    cancel2_mat_id = r.json()["id"]
+
+    # Wait for the upload to be processed
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{cancel2_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    cancel2_initial_status = r.json().get("status")
+    check("cancel2 material processed first", cancel2_initial_status == "ready", f"got {cancel2_initial_status}")
+
+    # Now create a pending job for this material and cancel it before worker picks it up
+    async def create_and_cancel_pending_job(material_id_val):
+        async with async_session() as session:
+            await session.execute(text(
+                "INSERT INTO material_parse_jobs (material_id, status, attempts, created_at) VALUES (:mat_id, 'pending', 0, datetime('now'))"
+            ), {"mat_id": material_id_val})
+            await session.commit()
+            r = await session.execute(text(
+                "SELECT id FROM material_parse_jobs WHERE material_id=:mat_id AND status='pending' ORDER BY id DESC LIMIT 1"
+            ), {"mat_id": material_id_val})
+            job_id = r.scalar()
+            # Cancel it immediately in the same session
+            await session.execute(text(
+                "UPDATE material_parse_jobs SET status='cancelled', finished_at=datetime('now') WHERE id=:jid"
+            ), {"jid": job_id})
+            await session.commit()
+            return job_id
+
+    loop_cc = asyncio.new_event_loop()
+    cancel2_job_id = loop_cc.run_until_complete(create_and_cancel_pending_job(cancel2_mat_id))
+    loop_cc.close()
+    check("cancel2 job created and cancelled", cancel2_job_id is not None)
+
+    # Verify the job is cancelled
+    r = client.get("/api/materials/jobs", params={"status": "cancelled"})
+    cancel2_found = [j for j in r.json() if j["id"] == cancel2_job_id]
+    check("cancel2 job is cancelled", len(cancel2_found) == 1, f"found={len(cancel2_found)}")
+
+    # Wait briefly — worker should NOT process the cancelled job
+    time.sleep(0.5)
+    r = client.get(f"/api/materials/{cancel2_mat_id}")
+    # Material should still be "ready" (its original status), not re-processed
+    check("cancelled job not processed, material still ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # ── 27g. Failed job can be retried (material retry creates new job) ──
+    print("\n[27g] Failed job can still trigger retry")
+    # Create a material with a real file, set it to failed, then retry
+    retry_file = os.path.join(_tmp_dir, "retry_after_cancel.txt")
+    with open(retry_file, "w", encoding="utf-8") as f:
+        f.write("重试取消后测试内容")
+    with open(retry_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("retry_after_cancel.txt", f, "text/plain")})
+    check("retry material upload 200", r.status_code == 200)
+    retry_mat_id = r.json()["id"]
+
+    # Wait for it to be processed
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{retry_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("retry material processed", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Simulate failure by setting status to failed in DB
+    async def set_failed_for_retry(mid):
+        async with async_session() as session:
+            await session.execute(text(
+                "UPDATE materials SET status='failed', error_message='重试测试失败' WHERE id=:mid"
+            ), {"mid": mid})
+            await session.commit()
+
+    loop_sfr = asyncio.new_event_loop()
+    loop_sfr.run_until_complete(set_failed_for_retry(retry_mat_id))
+    loop_sfr.close()
+
+    r = client.get(f"/api/materials/{retry_mat_id}")
+    check("retry material is failed", r.json().get("status") == "failed", f"got {r.json().get('status')}")
+
+    r = client.post(f"/api/materials/{retry_mat_id}/retry")
+    check("retry after cancel 200", r.status_code == 200, f"got {r.status_code}")
+    check("retry status pending", r.json().get("status") == "pending")
+
+    # Wait for retry to complete
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{retry_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("retry after cancel completes", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Cleanup
+    client.delete(f"/api/materials/{retry_mat_id}")
+
+    # Cleanup cancel test materials
+    client.delete(f"/api/materials/{cancel_mat_id}")
+    client.delete(f"/api/materials/{cancel2_mat_id}")
 
     # ── 24. Materials bulk operations ──
     print("\n[24] POST /api/materials/bulk-delete (validation)")

@@ -59,6 +59,28 @@ export interface MaterialSearchResult {
   snippet: string;
 }
 
+export interface ChunkItem {
+  id: number;
+  chunk_index: number;
+  content: string;
+  snippet: string;
+}
+
+export interface ParseJobItem {
+  id: number;
+  material_id: number;
+  filename: string;
+  status: string;
+  attempts: number;
+  error_message: string;
+  progress_current: number;
+  progress_total: number;
+  progress_message: string;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface ErrorBookItem {
   id: number;
   subject: string;
@@ -156,6 +178,14 @@ export const searchMaterials = (query: string, limit = 10): Promise<MaterialSear
 export const getMaterial = (id: number): Promise<MaterialDetail> =>
   api.get<MaterialDetail>(`/materials/${id}`).then(r => r.data);
 
+export const getMaterialChunks = (id: number, params?: { limit?: number; offset?: number; query?: string }): Promise<ChunkItem[]> => {
+  const p: Record<string, string | number> = {};
+  if (params?.limit) p.limit = params.limit;
+  if (params?.offset) p.offset = params.offset;
+  if (params?.query) p.query = params.query;
+  return api.get<ChunkItem[]>(`/materials/${id}/chunks`, { params: p }).then(r => r.data);
+};
+
 export const deleteMaterial = (id: number): Promise<OkResponse> =>
   api.delete<OkResponse>(`/materials/${id}`).then(r => r.data);
 
@@ -167,6 +197,17 @@ export const bulkDeleteMaterials = (ids: number[]): Promise<{ deleted: number; m
 
 export const exportSelectedMaterials = (ids: number[], includePreview = true): Promise<{ selected_count: number; materials: Record<string, unknown>[] }> =>
   api.post('/materials/export-selected', { ids, include_preview: includePreview }).then(r => r.data);
+
+export const listParseJobs = (params?: { limit?: number; offset?: number; status?: string }): Promise<ParseJobItem[]> => {
+  const p: Record<string, string | number> = {};
+  if (params?.limit) p.limit = params.limit;
+  if (params?.offset) p.offset = params.offset;
+  if (params?.status) p.status = params.status;
+  return api.get<ParseJobItem[]>('/materials/jobs', { params: p }).then(r => r.data);
+};
+
+export const cancelParseJob = (jobId: number): Promise<{ ok: boolean; job_id: number; status: string }> =>
+  api.post(`/materials/jobs/${jobId}/cancel`).then(r => r.data);
 
 // ── Problems ──
 export const solveProblem = (question: string, subject?: string): Promise<{ solution: string }> =>

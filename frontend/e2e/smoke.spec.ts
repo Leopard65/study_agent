@@ -86,12 +86,71 @@ test.describe('frontend smoke', () => {
       .last()
       .locator('xpath=ancestor::div[.//button[normalize-space()="查看"]][1]');
     await materialRow.getByRole('button', { name: '查看' }).click();
-    await expect(page.locator('pre').filter({ hasText: `关键词 ${marker}` })).toBeVisible();
-    await page.getByRole('button', { name: '×' }).click();
+
+    // Detail modal should show chunks with content
+    await expect(page.getByText(`关键词 ${marker}`).first()).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/段落 #1/)).toBeVisible();
+
+    // In-material search should work
+    await page.getByPlaceholder('在资料内搜索...').fill(marker);
+    await page.locator('.fixed').getByRole('button', { name: '搜索' }).click();
+    await expect(page.getByText(/匹配片段/)).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('.fixed mark').first()).toBeVisible();
+
+    await page.locator('.fixed').getByRole('button', { name: '×' }).click();
 
     page.on('dialog', dialog => dialog.accept());
     await materialRow.getByRole('button', { name: '删除' }).click();
     await expect(page.getByText(filename)).toHaveCount(0);
+  });
+
+  test('deep link with open and q opens material detail with search', async ({ page }) => {
+    const marker = `E2E深链-${Date.now()}`;
+    const filename = `${marker}.txt`;
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+
+    // Create material via API
+    const uploadRes = await page.request.post(`${apiBase}/materials/upload`, {
+      multipart: { file: { name: filename, mimeType: 'text/plain', buffer: Buffer.from(`深链测试内容包含关键词 ${marker} 用于验证。`, 'utf-8') } },
+    });
+    const mat = await uploadRes.json();
+    const matId = mat.id;
+
+    // Wait for parsing
+    for (let i = 0; i < 30; i++) {
+      const r = await page.request.get(`${apiBase}/materials/${matId}`);
+      const d = await r.json();
+      if (d.status === 'ready' || d.status === 'failed') break;
+      await page.waitForTimeout(200);
+    }
+
+    // Navigate with deep link: open=id&q=keyword
+    await page.goto(`/materials?open=${matId}&q=${encodeURIComponent(marker)}`);
+
+    // Modal should open with the material detail
+    await expect(page.getByText(filename).first()).toBeVisible({ timeout: 5_000 });
+
+    // The in-material search should be pre-filled with the query
+    await expect(page.getByPlaceholder('在资料内搜索...')).toHaveValue(marker);
+
+    // Should show matching chunks with highlights
+    await expect(page.getByText(/匹配片段/)).toBeVisible({ timeout: 5_000 });
+
+    // URL should have open removed but q preserved
+    await expect(page).toHaveURL(new RegExp(`q=${encodeURIComponent(marker)}`));
+    await expect(page).not.toHaveURL(/open=/);
+
+    // Close modal
+    await page.locator('.fixed').getByRole('button', { name: '×' }).click();
+
+    // Refresh: q is still in URL, but open is gone — modal should NOT reopen
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '资料库' })).toBeVisible();
+    // Modal should not be present (no open=id in URL)
+    await expect(page.getByText('在资料内搜索...')).toHaveCount(0);
+
+    // Cleanup
+    await page.request.delete(`${apiBase}/materials/${matId}`);
   });
 
   test('upload shows pending/processing status before ready', async ({ page }) => {
@@ -109,6 +168,43 @@ test.describe('frontend smoke', () => {
     // Should show one of: 等待解析, 解析中, 就绪 (transitions fast for txt)
     // Eventually should become 就绪
     await expect(page.getByText('就绪').first()).toBeVisible({ timeout: 10_000 });
+
+    // Cleanup
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    const listRes = await page.request.get(`${apiBase}/materials?limit=100`);
+    const items = await listRes.json();
+    const target = items.find((m: { filename: string }) => m.filename === filename);
+    if (target) {
+      await page.request.delete(`${apiBase}/materials/${target.id}`);
+    }
+  });
+
+  test('parse jobs section appears after upload and shows status', async ({ page }) => {
+    const marker = `E2E任务测试-${Date.now()}`;
+    const filename = `${marker}.txt`;
+
+    await page.goto('/materials');
+    await page.locator('input[type="file"][accept=".pdf,.docx,.doc,.txt,.md"]').setInputFiles({
+      name: filename,
+      mimeType: 'text/plain',
+      buffer: Buffer.from(`解析任务区域测试 ${marker}。`, 'utf-8'),
+    });
+
+    // The "解析任务" toggle should appear
+    await expect(page.getByText(/解析任务/)).toBeVisible({ timeout: 5_000 });
+
+    // Click to expand
+    await page.getByText(/解析任务/).click();
+
+    // Should show the job entry with filename
+    await expect(page.getByText(filename).first()).toBeVisible({ timeout: 5_000 });
+
+    // Wait for completion
+    await expect(page.getByText('就绪').first()).toBeVisible({ timeout: 10_000 });
+
+    // The jobs section should eventually show "已完成" status
+    // (may need to wait for poll to update)
+    await expect(page.getByText('已完成').first()).toBeVisible({ timeout: 10_000 });
 
     // Cleanup
     const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
@@ -255,6 +351,11 @@ test.describe('frontend smoke', () => {
 
       // URL should contain offset
       await expect(page).toHaveURL(/offset=/);
+
+      // Reload should restore all pages that had already been loaded.
+      await page.reload();
+      await expect(page.getByText(`${marker} 第24题`)).toBeVisible();
+      await expect(page.getByText(/已加载 20 条/)).toHaveCount(0);
 
       // Changing query resets pagination
       const input = page.getByPlaceholder('搜索资料、错题、计划、真题、问答、解析...');

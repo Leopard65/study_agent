@@ -7,9 +7,12 @@ class MaterialParseJob(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     material_id = Column(Integer, nullable=False, index=True)
-    status = Column(String(20), default="pending", nullable=False)  # pending / processing / done / failed
+    status = Column(String(20), default="pending", nullable=False)  # pending / processing / done / failed / cancelled
     attempts = Column(Integer, default=0, nullable=False)
     error_message = Column(Text, default="")
+    progress_current = Column(Integer, default=0)   # 当前完成步骤数
+    progress_total = Column(Integer, default=0)      # 总步骤数（0 = 未知/无阶段）
+    progress_message = Column(String(200), default="")  # 当前阶段描述
     created_at = Column(DateTime, server_default=func.now())
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)

@@ -87,6 +87,31 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
 
 
+class ParseJobItem(BaseModel):
+    id: int
+    material_id: int
+    filename: str = ""
+    status: str = "pending"
+    attempts: int = 0
+    error_message: str = ""
+    progress_current: int = 0
+    progress_total: int = 0
+    progress_message: str = ""
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ChunkItem(BaseModel):
+    id: int
+    chunk_index: int
+    content: str = ""
+    snippet: str = ""  # 带高亮标记的片段（query 非空时）
+
+
 class SearchResult(BaseModel):
     material_id: int
     filename: str

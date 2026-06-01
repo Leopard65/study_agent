@@ -53,3 +53,12 @@ async def init_db():
         if "error_message" not in columns:
             await conn.execute(text("ALTER TABLE materials ADD COLUMN error_message TEXT DEFAULT ''"))
         await conn.execute(text("UPDATE materials SET error_message = '' WHERE error_message IS NULL"))
+        # Lightweight migration: add progress fields to material_parse_jobs if missing
+        result = await conn.execute(text("PRAGMA table_info(material_parse_jobs)"))
+        columns = [row[1] for row in result.fetchall()]
+        if "progress_current" not in columns:
+            await conn.execute(text("ALTER TABLE material_parse_jobs ADD COLUMN progress_current INTEGER DEFAULT 0"))
+        if "progress_total" not in columns:
+            await conn.execute(text("ALTER TABLE material_parse_jobs ADD COLUMN progress_total INTEGER DEFAULT 0"))
+        if "progress_message" not in columns:
+            await conn.execute(text("ALTER TABLE material_parse_jobs ADD COLUMN progress_message VARCHAR(200) DEFAULT ''"))

@@ -1,16 +1,44 @@
 import os, uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models import Material, MaterialParseJob
-from app.schemas import MaterialItem, MaterialDetail, SearchRequest, SearchResult, BulkDeleteRequest, ExportSelectedRequest
-from app.services.search import search_chunks, delete_chunks_for_material
+from app.schemas import MaterialItem, MaterialDetail, SearchRequest, SearchResult, BulkDeleteRequest, ExportSelectedRequest, ParseJobItem, ChunkItem
+from app.services.search import search_chunks, delete_chunks_for_material, _contains_cjk, _extract_keywords
 from app.services.parse_worker import get_worker
 from app.config import get_settings
 
 router = APIRouter(prefix="/api/materials", tags=["materials"])
 settings = get_settings()
+VALID_JOB_STATUSES = {"pending", "processing", "done", "failed", "cancelled"}
+
+
+def _build_marked_snippet(content: str, terms: list[str], context_chars: int = 60) -> str:
+    """Build a short snippet with >>>...<<< around the first matching term."""
+    for term in terms:
+        if not term:
+            continue
+        idx = content.find(term)
+        if idx == -1:
+            idx = content.lower().find(term.lower())
+        if idx == -1:
+            continue
+
+        match_text = content[idx:idx + len(term)]
+        start = max(0, idx - context_chars)
+        end = min(len(content), idx + len(term) + context_chars)
+        snippet = "..." if start > 0 else ""
+        snippet += content[start:idx]
+        snippet += f">>>{match_text}<<<"
+        snippet += content[idx + len(term):end]
+        if end < len(content):
+            snippet += "..."
+        return snippet
+
+    fallback_len = context_chars * 2
+    return content[:fallback_len] + ("..." if len(content) > fallback_len else "")
 
 
 def _delete_uploaded_file(stored_filename: str) -> None:
@@ -129,6 +157,77 @@ async def search(req: SearchRequest, db: AsyncSession = Depends(get_db)):
     return results
 
 
+@router.get("/jobs", response_model=list[ParseJobItem])
+async def list_jobs(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """返回最近的解析任务列表，含 material filename。"""
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    query = select(MaterialParseJob).order_by(MaterialParseJob.created_at.desc())
+    if status:
+        if status not in VALID_JOB_STATUSES:
+            raise HTTPException(422, f"status 包含无效值: {status}，允许: {','.join(sorted(VALID_JOB_STATUSES))}")
+        query = query.where(MaterialParseJob.status == status)
+    query = query.offset(offset).limit(limit)
+    rows = await db.execute(query)
+    jobs = rows.scalars().all()
+
+    # 批量获取 material filenames
+    mat_ids = {j.material_id for j in jobs}
+    mat_map: dict[int, str] = {}
+    if mat_ids:
+        mats = await db.execute(select(Material).where(Material.id.in_(mat_ids)))
+        for m in mats.scalars().all():
+            mat_map[m.id] = m.filename
+
+    return [
+        ParseJobItem(
+            id=j.id,
+            material_id=j.material_id,
+            filename=mat_map.get(j.material_id, ""),
+            status=j.status,
+            attempts=j.attempts,
+            error_message=j.error_message or "",
+            progress_current=j.progress_current or 0,
+            progress_total=j.progress_total or 0,
+            progress_message=j.progress_message or "",
+            created_at=j.created_at,
+            started_at=j.started_at,
+            finished_at=j.finished_at,
+        )
+        for j in jobs
+    ]
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: int, db: AsyncSession = Depends(get_db)):
+    """取消 pending 状态的解析任务。processing 状态返回 422。"""
+    job = await db.get(MaterialParseJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status != "pending":
+        if job.status == "processing":
+            raise HTTPException(422, "正在解析中，暂不支持中断")
+        raise HTTPException(
+            422,
+            f"当前状态 {job.status} 不支持取消，仅 pending 可取消",
+        )
+    job.status = "cancelled"
+    job.finished_at = datetime.now(timezone.utc)
+    # 同步 material 状态
+    mat = await db.get(Material, job.material_id)
+    if mat and mat.status == "pending":
+        mat.status = "failed"
+        mat.error_message = "任务已取消"
+    await db.commit()
+    await db.refresh(job)
+    return {"ok": True, "job_id": job.id, "status": job.status}
+
+
 @router.post("/bulk-delete")
 async def bulk_delete(req: BulkDeleteRequest, db: AsyncSession = Depends(get_db)):
     deleted = 0
@@ -188,6 +287,79 @@ async def get_material(material_id: int, db: AsyncSession = Depends(get_db)):
         error_message=mat.error_message or "",
         created_at=mat.created_at,
     )
+
+
+@router.get("/{material_id}/chunks", response_model=list[ChunkItem])
+async def get_material_chunks(
+    material_id: int,
+    limit: int = 20,
+    offset: int = 0,
+    query: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """返回资料的分块内容，支持分页和资料内搜索高亮。"""
+    mat = await db.get(Material, material_id)
+    if not mat:
+        raise HTTPException(404, "资料不存在")
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
+    from sqlalchemy import text as sql_text
+    from app.models import MaterialChunk
+
+    if query and query.strip():
+        query = query.strip()
+        highlight_terms = [query]
+        # 搜索模式：在该资料的 chunks 中查找含 query 的块
+        if _contains_cjk(query):
+            keywords = _extract_keywords(query)
+            if not keywords:
+                keywords = [query]
+            highlight_terms = keywords
+            conditions = " OR ".join([f"content LIKE :q{i}" for i in range(len(keywords))])
+            params: dict = {f"q{i}": f"%{kw}%" for i, kw in enumerate(keywords)}
+            params["mid"] = material_id
+            params["l"] = limit
+            params["o"] = offset
+            result = await db.execute(
+                sql_text(
+                    f"SELECT id, chunk_index, content FROM material_chunks "
+                    f"WHERE material_id = :mid AND ({conditions}) "
+                    f"ORDER BY chunk_index LIMIT :l OFFSET :o"
+                ).bindparams(**params)
+            )
+        else:
+            # FTS5 search within this material
+            fts_query = '"' + query.replace('"', '""') + '"'
+            result = await db.execute(
+                sql_text(
+                    "SELECT mc.id, mc.chunk_index, mc.content FROM material_chunks mc "
+                    "INNER JOIN chunks_fts fts ON fts.chunk_id = mc.id "
+                    "WHERE fts.material_id = :mid AND chunks_fts MATCH :q "
+                    "ORDER BY mc.chunk_index LIMIT :l OFFSET :o"
+                ).bindparams(mid=material_id, q=fts_query, l=limit, o=offset)
+            )
+
+        rows = result.fetchall()
+        items = []
+        for r in rows:
+            snippet = _build_marked_snippet(r[2], highlight_terms)
+            items.append(ChunkItem(id=r[0], chunk_index=r[1], content=r[2], snippet=snippet))
+        return items
+
+    # 无搜索：分页返回 chunks
+    result = await db.execute(
+        select(MaterialChunk)
+        .where(MaterialChunk.material_id == material_id)
+        .order_by(MaterialChunk.chunk_index)
+        .offset(offset)
+        .limit(limit)
+    )
+    chunks = result.scalars().all()
+    return [
+        ChunkItem(id=c.id, chunk_index=c.chunk_index, content=c.content, snippet="")
+        for c in chunks
+    ]
 
 
 @router.post("/{material_id}/retry", response_model=MaterialItem)
