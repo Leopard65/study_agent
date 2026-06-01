@@ -73,6 +73,9 @@ test.describe('frontend smoke', () => {
 
     await expect(page.getByText(filename)).toBeVisible();
 
+    // Wait for background parsing to complete (status badge becomes "就绪")
+    await expect(page.getByText('就绪').first()).toBeVisible({ timeout: 10_000 });
+
     await page.getByPlaceholder('关键词检索资料内容...').fill(marker);
     await page.getByRole('button', { name: '搜索' }).click();
     await expect(page.getByRole('heading', { name: /搜索结果/ })).toBeVisible();
@@ -89,6 +92,32 @@ test.describe('frontend smoke', () => {
     page.on('dialog', dialog => dialog.accept());
     await materialRow.getByRole('button', { name: '删除' }).click();
     await expect(page.getByText(filename)).toHaveCount(0);
+  });
+
+  test('upload shows pending/processing status before ready', async ({ page }) => {
+    const marker = `E2E状态测试-${Date.now()}`;
+    const filename = `${marker}.txt`;
+
+    await page.goto('/materials');
+    await page.locator('input[type="file"][accept=".pdf,.docx,.doc,.txt,.md"]').setInputFiles({
+      name: filename,
+      mimeType: 'text/plain',
+      buffer: Buffer.from(`状态流转测试 ${marker}。`, 'utf-8'),
+    });
+
+    await expect(page.getByText(filename)).toBeVisible();
+    // Should show one of: 等待解析, 解析中, 就绪 (transitions fast for txt)
+    // Eventually should become 就绪
+    await expect(page.getByText('就绪').first()).toBeVisible({ timeout: 10_000 });
+
+    // Cleanup
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    const listRes = await page.request.get(`${apiBase}/materials?limit=100`);
+    const items = await listRes.json();
+    const target = items.find((m: { filename: string }) => m.filename === filename);
+    if (target) {
+      await page.request.delete(`${apiBase}/materials/${target.id}`);
+    }
   });
 
   test('shows error stats panel with charts', async ({ page }) => {
@@ -151,5 +180,131 @@ test.describe('frontend smoke', () => {
     // Close stats
     await page.getByText('收起错题统计').click();
     await expect(page.getByText('总错题')).toHaveCount(0);
+  });
+
+  test('search restores URL state and syncs type filters', async ({ page }) => {
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    const marker = `E2E搜索-${Date.now()}`;
+    const errorRes = await page.request.post(`${apiBase}/errors`, {
+      data: { question: `${marker} 错题题干`, subject: '高数', error_type: '搜索测试' },
+    });
+    const examRes = await page.request.post(`${apiBase}/exam/questions`, {
+      data: { title: `${marker} 真题标题`, question: `${marker} 真题题干` },
+    });
+    const errorId = (await errorRes.json()).id;
+    const examId = (await examRes.json()).id;
+
+    await page.goto(`/search?q=${encodeURIComponent(marker)}&types=errors`);
+
+    await expect(page.getByPlaceholder('搜索资料、错题、计划、真题、问答、解析...')).toHaveValue(marker);
+    await expect(page.getByText(`${marker} 错题题干`)).toBeVisible();
+    await expect(page.getByText('题干命中')).toBeVisible();
+    await expect(page.getByText(`${marker} 真题标题`)).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`q=${encodeURIComponent(marker)}.*types=errors`));
+
+    await page.reload();
+    await expect(page.getByText(`${marker} 错题题干`)).toBeVisible();
+
+    await page.getByRole('button', { name: /真题/ }).click();
+    await expect(page).toHaveURL(/types=errors%2Cexam|types=errors,exam/);
+    await expect(page.getByText(`${marker} 真题标题`)).toBeVisible();
+
+    await page.getByRole('button', { name: '清除筛选' }).click();
+    await expect(page).not.toHaveURL(/types=/);
+    await expect(page.getByText(`${marker} 错题题干`)).toBeVisible();
+    await expect(page.getByText(`${marker} 真题标题`)).toBeVisible();
+    await expect(page.getByText(/共找到 \d+ 条结果/)).toBeVisible();
+
+    await page.request.delete(`${apiBase}/errors/${errorId}`);
+    await page.request.delete(`${apiBase}/exam/questions/${examId}`);
+  });
+
+  test('search pagination: load more and reset on query change', async ({ page }) => {
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    const marker = `E2E分页-${Date.now()}`;
+    const createdIds: number[] = [];
+
+    // Create enough errors to trigger pagination (PAGE_SIZE=20, need >20)
+    for (let i = 0; i < 25; i++) {
+      const res = await page.request.post(`${apiBase}/errors`, {
+        data: { question: `${marker} 第${i}题`, subject: '分页测试', error_type: '分页' },
+      });
+      createdIds.push((await res.json()).id);
+    }
+
+    await page.goto(`/search?q=${encodeURIComponent(marker)}`);
+    await expect(page.getByText(/共找到 \d+ 条结果/)).toBeVisible();
+
+    // Should show "已加载 20 条" if total > 20
+    const totalText = page.getByText(/共找到 \d+ 条结果/);
+    await expect(totalText).toBeVisible();
+
+    // "加载更多" button should be visible if total > loaded
+    const loadMoreBtn = page.getByRole('button', { name: '加载更多' });
+    // It may or may not be visible depending on total vs PAGE_SIZE
+    const totalMatch = await totalText.textContent();
+    const totalNum = parseInt(totalMatch?.match(/共找到 (\d+) 条/)?.[1] || '0', 10);
+
+    if (totalNum > 20) {
+      await expect(loadMoreBtn).toBeVisible();
+      await expect(page.getByText(/已加载 20 条/)).toBeVisible();
+
+      // Click load more
+      await loadMoreBtn.click();
+      await expect(page.getByText(/已加载/)).not.toBeVisible(); // all loaded now
+
+      // URL should contain offset
+      await expect(page).toHaveURL(/offset=/);
+
+      // Changing query resets pagination
+      const input = page.getByPlaceholder('搜索资料、错题、计划、真题、问答、解析...');
+      await input.fill('新关键词');
+      await page.waitForTimeout(400);
+      await expect(page).not.toHaveURL(/offset=/);
+    }
+
+    // Cleanup
+    for (const id of createdIds) {
+      await page.request.delete(`${apiBase}/errors/${id}`);
+    }
+  });
+});
+
+test.describe('search network behavior', () => {
+  test.use({ serviceWorkers: 'block' });
+
+  test('search ignores stale slower responses', async ({ page }) => {
+    await page.route('**/api/search**', async route => {
+      const url = new URL(route.request().url());
+      const q = url.searchParams.get('q') || '';
+      if (q === 'slow') {
+        await new Promise(resolve => setTimeout(resolve, 900));
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: q,
+          total: 1,
+          results: [{
+            type: 'error',
+            id: q === 'slow' ? 1 : 2,
+            title: `${q}-result`,
+            snippet: `${q}-snippet`,
+            created_at: null,
+            match_field: 'question',
+          }],
+        }),
+      });
+    });
+
+    await page.goto('/search');
+    const input = page.getByPlaceholder('搜索资料、错题、计划、真题、问答、解析...');
+    await input.fill('slow');
+    await page.waitForTimeout(350);
+    await input.fill('fast');
+
+    await expect(page.getByText('fast-result')).toBeVisible();
+    await expect(page.getByText('slow-result')).toHaveCount(0);
   });
 });

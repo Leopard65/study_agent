@@ -37,6 +37,7 @@ def _match_field(q: str, *fields: str | None) -> str:
 async def global_search(
     q: str = "",
     types: str = "",
+    offset: int = 0,
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
 ):
@@ -46,6 +47,8 @@ async def global_search(
         raise HTTPException(422, "搜索关键词最长 100 字符")
     if limit < 1 or limit > 50:
         raise HTTPException(422, "limit 范围 1-50")
+    if offset < 0:
+        raise HTTPException(422, "offset 不能为负数")
 
     if types:
         type_list = [t.strip() for t in types.split(",") if t.strip()]
@@ -58,7 +61,10 @@ async def global_search(
 
     q_stripped = q.strip()
     results: list[dict] = []
-    per_type = max(limit // max(len(type_set), 1), 3)
+    # 每个类型拉取足够多的结果，保证分页 total 准确
+    # 取 limit + offset 的总量与每类型上限的较大值
+    page_cap = offset + limit
+    per_type = max(page_cap // max(len(type_set), 1), 10)
 
     # Materials（按 material_id 去重，每个资料只保留最佳 chunk）
     if "materials" in type_set:
@@ -184,4 +190,4 @@ async def global_search(
     priority_fields = {"title", "question", "subject", "tags", "knowledge_point", "error_type"}
     results.sort(key=lambda r: (0 if r.get("match_field") in priority_fields else 1))
 
-    return {"query": q, "results": results[:limit]}
+    return {"query": q, "total": len(results), "results": results[offset:offset + limit]}

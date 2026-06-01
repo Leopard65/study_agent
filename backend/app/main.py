@@ -13,7 +13,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     os.makedirs(settings.upload_dir, exist_ok=True)
     await init_db()
+    from app.services.parse_worker import start_worker, stop_worker
+    await start_worker()
     yield
+    await stop_worker()
 
 
 app = FastAPI(title="考研学习助手", version="0.2.0", lifespan=lifespan)

@@ -35,6 +35,8 @@ export interface MaterialItem {
   filename: string;
   file_type: string;
   stored_filename: string | null;
+  status: string;
+  error_message: string;
   created_at: string | null;
 }
 
@@ -46,6 +48,8 @@ export interface MaterialDetail {
   preview: string;
   content_length: number;
   truncated: boolean;
+  status: string;
+  error_message: string;
   created_at: string | null;
 }
 
@@ -154,6 +158,9 @@ export const getMaterial = (id: number): Promise<MaterialDetail> =>
 
 export const deleteMaterial = (id: number): Promise<OkResponse> =>
   api.delete<OkResponse>(`/materials/${id}`).then(r => r.data);
+
+export const retryMaterial = (id: number): Promise<MaterialItem> =>
+  api.post<MaterialItem>(`/materials/${id}/retry`).then(r => r.data);
 
 export const bulkDeleteMaterials = (ids: number[]): Promise<{ deleted: number; missing: number }> =>
   api.post<{ deleted: number; missing: number }>('/materials/bulk-delete', { ids }).then(r => r.data);
@@ -391,13 +398,15 @@ export interface SearchResult {
 
 export interface SearchResponse {
   query: string;
+  total: number;
   results: SearchResult[];
 }
 
-export const globalSearch = (q: string, types?: string, limit?: number): Promise<SearchResponse> => {
+export const globalSearch = (q: string, types?: string, limit?: number, offset?: number): Promise<SearchResponse> => {
   const params: Record<string, string | number> = { q };
   if (types) params.types = types;
   if (limit) params.limit = limit;
+  if (offset) params.offset = offset;
   return api.get<SearchResponse>('/search', { params }).then(r => r.data);
 };
 

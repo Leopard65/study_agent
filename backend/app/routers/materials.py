@@ -3,10 +3,10 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
-from app.models import Material
+from app.models import Material, MaterialParseJob
 from app.schemas import MaterialItem, MaterialDetail, SearchRequest, SearchResult, BulkDeleteRequest, ExportSelectedRequest
-from app.services.doc_parser import extract_text
-from app.services.search import index_chunks, search_chunks, delete_chunks_for_material
+from app.services.search import search_chunks, delete_chunks_for_material
+from app.services.parse_worker import get_worker
 from app.config import get_settings
 
 router = APIRouter(prefix="/api/materials", tags=["materials"])
@@ -29,6 +29,15 @@ def _delete_uploaded_file(stored_filename: str) -> None:
             os.remove(file_abs)
     except OSError:
         pass
+
+
+async def _delete_jobs_for_material(db: AsyncSession, material_id: int) -> None:
+    """删除资料关联的所有 parse jobs。"""
+    jobs = await db.execute(
+        select(MaterialParseJob).where(MaterialParseJob.material_id == material_id)
+    )
+    for job in jobs.scalars().all():
+        await db.delete(job)
 
 
 @router.post("/upload", response_model=MaterialItem)
@@ -63,16 +72,26 @@ async def upload(file: UploadFile = File(...), db: AsyncSession = Depends(get_db
         raise
 
     try:
-        text_content = extract_text(save_path)
-        material = Material(filename=file.filename or save_name, file_type=ext, content=text_content, stored_filename=save_name)
+        material = Material(
+            filename=file.filename or save_name,
+            file_type=ext,
+            content="",
+            stored_filename=save_name,
+            status="pending",
+            error_message="",
+        )
         db.add(material)
         await db.flush()
 
-        if text_content.strip():
-            await index_chunks(db, material.id, text_content)
-
+        # 创建 parse job
+        job = MaterialParseJob(material_id=material.id, status="pending", attempts=0)
+        db.add(job)
         await db.commit()
         await db.refresh(material)
+
+        # 通知 worker
+        await get_worker().enqueue(material.id)
+
         return material
     except Exception:
         await db.rollback()
@@ -120,6 +139,7 @@ async def bulk_delete(req: BulkDeleteRequest, db: AsyncSession = Depends(get_db)
             missing += 1
             continue
         await delete_chunks_for_material(db, mid)
+        await _delete_jobs_for_material(db, mid)
         _delete_uploaded_file(mat.stored_filename or "")
         await db.delete(mat)
         deleted += 1
@@ -164,8 +184,36 @@ async def get_material(material_id: int, db: AsyncSession = Depends(get_db)):
         preview=content[:preview_limit] if preview_limit else "",
         content_length=len(content),
         truncated=len(content) > preview_limit if preview_limit else bool(content),
+        status=mat.status or "ready",
+        error_message=mat.error_message or "",
         created_at=mat.created_at,
     )
+
+
+@router.post("/{material_id}/retry", response_model=MaterialItem)
+async def retry_material(material_id: int, db: AsyncSession = Depends(get_db)):
+    mat = await db.get(Material, material_id)
+    if not mat:
+        raise HTTPException(404, "资料不存在")
+    if mat.status not in ("failed",):
+        raise HTTPException(422, f"当前状态 {mat.status} 不支持重试，仅 failed 可重试")
+    stored = mat.stored_filename or ""
+    if not stored:
+        raise HTTPException(422, "缺少存储文件，无法重试")
+    file_path = os.path.join(settings.upload_dir, stored)
+    if not os.path.isfile(file_path):
+        raise HTTPException(422, "存储文件不存在，无法重试")
+    mat.status = "pending"
+    mat.error_message = ""
+
+    # 创建新 job
+    job = MaterialParseJob(material_id=material_id, status="pending", attempts=0)
+    db.add(job)
+    await db.commit()
+    await db.refresh(mat)
+
+    await get_worker().enqueue(material_id)
+    return mat
 
 
 @router.delete("/{material_id}")
@@ -174,6 +222,7 @@ async def delete_material(material_id: int, db: AsyncSession = Depends(get_db)):
     if not mat:
         raise HTTPException(404, "资料不存在")
     await delete_chunks_for_material(db, material_id)
+    await _delete_jobs_for_material(db, material_id)
     _delete_uploaded_file(mat.stored_filename or "")
     await db.delete(mat)
     await db.commit()

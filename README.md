@@ -23,7 +23,7 @@
 |---|---|---|
 | 学习工作台 | `/` | 今日任务（可直接勾选）、连续打卡、今日复习数、今日学习时长、未掌握错题统计、复习入口、专注计时、7/30 天学习趋势图表 |
 | AI 问答 | `/qa` | 对话式问答，自动检索资料库（RAG），LaTeX 公式渲染 |
-| 资料库 | `/materials` | 上传 PDF/Word/TXT/MD，分块索引，中文关键词检索，可查看资料详情和解析文本预览，删除时同步清理文件和索引，批量选择删除，导出选中资料元数据 |
+| 资料库 | `/materials` | 上传 PDF/Word/TXT/MD，后台异步解析（含 OCR fallback），解析状态流转（pending→processing→ready/failed），失败可重试，分块索引，中文关键词检索，可查看资料详情和解析文本预览，删除时同步清理文件和索引，批量选择删除，导出选中资料元数据 |
 | 题目解析 | `/problems` | 输入题目，AI 返回完整解题步骤，可一键加入错题本 |
 | 错题本 | `/errors` | 科目/章节/知识点/错误类型/标签/复习时间，掌握状态筛选，今日复习筛选，可配置复习间隔（默认 1/3/7/14 天），LaTeX 渲染，统计分析（科目/错误类型/知识点分布、30 天趋势） |
 | 学习计划 | `/plan` | 手动添加 + AI 一键生成（JSON 解析，失败可查看原始返回），按日分组，勾选完成 |
@@ -307,14 +307,18 @@ OCR_LANG=chi_sim+eng
 - 最近 30 天新增错题趋势图
 - 空值字段归为"未分类"，分布取前 10
 - `due_today` 口径与 Dashboard 今日复习一致（`next_review_date <= today` 且 `mastered=false`）
-- 纯 CSS 条形图实现，无图表库依赖，支持深色模式
+- 基于 Recharts 的真实图表，含 tooltip、空数据状态、移动端适配和深色模式
 
 ## 全局搜索
 
 - 统一搜索入口 `/search`，同时检索资料、错题、学习计划、真题、聊天历史、题目解析
-- 支持按类型筛选（materials/errors/plans/exam/chat/problems）
+- 支持按类型筛选（materials/errors/plans/exam/chat/problems），筛选和关键词会同步到 URL，刷新后自动恢复
 - 资料搜索复用现有 FTS5 + LIKE 检索，其他表用 LIKE 搜索关键字段
-- snippet 为纯文本截断，不含 HTML 标签
+- 严格校验类型参数，混入非法类型会返回 422
+- 搜索结果包含命中来源（如标题/题干/正文/标签命中）、类型统计和结果总数
+- 支持分页加载（offset/limit），前端"加载更多"按钮追加结果，切换关键词或类型自动重置分页
+- 分页状态同步到 URL（offset 参数），刷新后恢复已加载的结果
+- snippet 为纯文本截断，不含 HTML 标签，同一资料的多个 chunk 会按资料去重
 - 点击结果跳转到对应页面并定位到具体数据（资料自动打开详情弹窗，错题自动展开+蓝色高亮，计划自动滚动+高亮，真题自动展开）
 
 ## 学习会话/专注计时
@@ -430,9 +434,9 @@ npx playwright install chromium
 npm run e2e
 ```
 
-截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏（使用统一时区 helper）、工作台统计（含 today_review_errors 时区一致性、未来日期不计入复习数）、输入校验（空值/格式/范围 422，含 chat 和 plan/generate 边界值及纯空白科目拒绝）、搜索片段安全、真题练习 CRUD（创建/列表/筛选/详情/提交答案/加入错题本/删除级联）、真题输入校验（空标题/空题目/错误年份格式/不存在 ID 404）、真题加入错题本去重（重复添加返回 409）、AI 生成练习题草稿（count 越界/空 topic 422、无 API key 503、JSON 解析失败返回 parse_error、mock 成功不写入数据库）、数据导出 JSON（endpoint 200、关键字段存在、materials 不含完整 content、exam_attempts 结构完整、数据条数一致）、复习策略配置（默认值、PUT 校验、非递增/空/越界 422、自定义间隔影响错题复习日期、超出长度使用最后间隔）、数据导入恢复（预检不写 DB、导入后数量增加、二次导入跳过重复、exam_attempts question_id 映射、缺少字段 422、materials 不导入 content、冲突策略 skip/overwrite/keep_both、非法策略 422、覆盖后字段更新验证、保留两份自动重命名、keep_both 长文本不截断、冲突预览检测含每模块新增/冲突/预测数量和样例、预览与实际导入结果一致验证、快速切换策略后返回正确结果、预览接口无副作用不改变数据库）、学习趋势洞察（days=7/30、非法 days 422、插入测试数据后统计正确）、全局搜索（空 q/limit 越界 422、类型过滤、插入各类数据后搜到对应类型、snippet 不含 HTML、搜索结果 ID 为实体 ID 非 chunk ID、资料标题返回文件名）、学习会话/专注计时（start/stop/active/list、重复 start 409、double stop 409、duration_minutes 计算、dashboard today_study_minutes、trends study_minutes）、错题统计分析（空数据结构校验、插入多科目/错误类型/知识点后统计正确、掌握/未掌握/待复习计数、分布列表 Top 10、30 天趋势序列长度和今日计数）、资料库批量操作（bulk-delete 空/超限 422、批量删除多资料后 DB/chunks/files 清理、missing 计数正确、export-selected 返回正确字段不含 stored file、include_preview 行为正确），结果为 `502 passed, 0 failed`。
+截至当前版本，本地冒烟测试覆盖 health、资料上传/检索/详情/删除、资料列表分页、详情截断预览、搜索 limit 边界、超大文件拒绝（413）、OCR fallback 图片型 PDF 识别（含内容断言）、学习计划 CRUD、错题本 CRUD、自动复习节奏（使用统一时区 helper）、工作台统计（含 today_review_errors 时区一致性、未来日期不计入复习数）、输入校验（空值/格式/范围 422，含 chat 和 plan/generate 边界值及纯空白科目拒绝）、搜索片段安全、真题练习 CRUD（创建/列表/筛选/详情/提交答案/加入错题本/删除级联）、真题输入校验（空标题/空题目/错误年份格式/不存在 ID 404）、真题加入错题本去重（重复添加返回 409）、AI 生成练习题草稿（count 越界/空 topic 422、无 API key 503、JSON 解析失败返回 parse_error、mock 成功不写入数据库）、数据导出 JSON（endpoint 200、关键字段存在、materials 不含完整 content、exam_attempts 结构完整、数据条数一致）、复习策略配置（默认值、PUT 校验、非递增/空/越界 422、自定义间隔影响错题复习日期、超出长度使用最后间隔）、数据导入恢复（预检不写 DB、导入后数量增加、二次导入跳过重复、exam_attempts question_id 映射、缺少字段 422、materials 不导入 content、冲突策略 skip/overwrite/keep_both、非法策略 422、覆盖后字段更新验证、保留两份自动重命名、keep_both 长文本不截断、冲突预览检测含每模块新增/冲突/预测数量和样例、预览与实际导入结果一致验证、快速切换策略后返回正确结果、预览接口无副作用不改变数据库）、学习趋势洞察（days=7/30、非法 days 422、插入测试数据后统计正确）、全局搜索（空 q/limit 越界 422、严格类型校验、混合非法 types 拒绝、插入各类数据后搜到对应类型、snippet 不含 HTML、match_field 命中来源、资料按 material_id 去重、标题/题干命中优先、搜索结果 ID 为实体 ID 非 chunk ID、资料标题返回文件名、搜索分页 offset/limit、total 总数正确、负 offset 422、offset 超出返回空结果、各页结果不重叠）、资料后台解析状态流转（上传后 pending→processing→ready、解析完成写入 content/chunks/FTS、手动模拟 failed 状态可见错误信息、retry 恢复为 pending 再完成解析、retry 非 failed 状态 422、retry 不存在 404、删除资料清理文件/chunks/jobs）、解析任务队列持久化（parse job 创建/状态 done/attempts 验证、retry 创建新 job 并 attempts 递增、启动恢复逻辑：processing→pending 重置、并发顺序上传全部完成）、学习会话/专注计时（start/stop/active/list、重复 start 409、double stop 409、duration_minutes 计算、dashboard today_study_minutes、trends study_minutes）、错题统计分析（空数据结构校验、插入多科目/错误类型/知识点后统计正确、掌握/未掌握/待复习计数、分布列表 Top 10、30 天趋势序列长度和今日计数）、资料库批量操作（bulk-delete 空/超限 422、批量删除多资料后 DB/chunks/files 清理、missing 计数正确、export-selected 返回正确字段不含 stored file、include_preview 行为正确），结果为 `576 passed, 0 failed`。
 
-Playwright 端到端冒烟测试覆盖主路由加载、命令面板导航、深色主题与侧栏折叠偏好持久化、移动端侧栏抽屉、资料上传/搜索/预览/删除、错题统计图表桌面与移动端渲染。E2E 会自动启动隔离端口的后端和前端，并使用 `backend/data/e2e.db` 与 `backend/uploads/e2e`，不污染本地默认数据。
+Playwright 端到端冒烟测试覆盖主路由加载、命令面板导航、深色主题与侧栏折叠偏好持久化、移动端侧栏抽屉、资料上传/搜索/预览/删除（含异步解析等待就绪）、资料上传后状态流转展示（pending→ready）、错题统计图表桌面与移动端渲染、搜索 URL 状态恢复、类型筛选同步、命中来源展示、清除筛选后重搜和竞态请求保护、搜索分页加载更多与关键词重置分页。E2E 会自动启动隔离端口的后端和前端，并使用 `backend/data/e2e.db` 与 `backend/uploads/e2e`，不污染本地默认数据。
 
 ## License
 

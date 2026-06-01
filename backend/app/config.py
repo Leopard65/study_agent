@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 30
     max_upload_mb: int = 50
     material_preview_chars: int = 5000
+    material_parse_concurrency: int = 1
 
     class Config:
         env_file = ".env"

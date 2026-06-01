@@ -44,3 +44,12 @@ async def init_db():
         if "conversation_id" not in columns:
             await conn.execute(text("ALTER TABLE chat_history ADD COLUMN conversation_id VARCHAR(50) DEFAULT ''"))
         await conn.execute(text("UPDATE chat_history SET conversation_id = '' WHERE conversation_id IS NULL"))
+        # Lightweight migration: add status/error_message to materials if missing
+        result = await conn.execute(text("PRAGMA table_info(materials)"))
+        columns = [row[1] for row in result.fetchall()]
+        if "status" not in columns:
+            await conn.execute(text("ALTER TABLE materials ADD COLUMN status VARCHAR(20) DEFAULT 'ready'"))
+        await conn.execute(text("UPDATE materials SET status = 'ready' WHERE status IS NULL"))
+        if "error_message" not in columns:
+            await conn.execute(text("ALTER TABLE materials ADD COLUMN error_message TEXT DEFAULT ''"))
+        await conn.execute(text("UPDATE materials SET error_message = '' WHERE error_message IS NULL"))

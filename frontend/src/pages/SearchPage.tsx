@@ -26,6 +26,7 @@ const MATCH_FIELD_LABELS: Record<string, string> = {
 
 const HISTORY_KEY = 'math_agent_search_history';
 const MAX_HISTORY = 5;
+const PAGE_SIZE = 20;
 
 function loadHistory(): string[] {
   try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch { return []; }
@@ -46,48 +47,80 @@ export default function SearchPage() {
     return t ? new Set(t.split(',').filter(x => ALL_TYPES.includes(x))) : new Set();
   });
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(() => {
+    const o = urlParams.get('offset');
+    return o ? Math.max(0, parseInt(o, 10) || 0) : 0;
+  });
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
-  const [searched, setSearched] = useState(!!urlParams.get('q'));
+  const [searched, setSearched] = useState(false);
   const [history, setHistory] = useState<string[]>(loadHistory);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const requestIdRef = useRef(0);
 
-  const syncUrl = useCallback((q: string, types: Set<string>) => {
+  const syncUrl = useCallback((q: string, types: Set<string>, off: number) => {
     const params: Record<string, string> = {};
     if (q.trim()) params.q = q.trim();
     if (types.size > 0) params.types = [...types].join(',');
+    if (off > 0) params.offset = String(off);
     setUrlParams(params, { replace: true });
   }, [setUrlParams]);
 
-  const doSearch = useCallback(async (q: string, types: Set<string>, reqId?: number) => {
+  const doSearch = useCallback(async (
+    q: string,
+    types: Set<string>,
+    reqId: number,
+    append: boolean,
+    searchOffset: number,
+  ) => {
     if (!q.trim()) return;
-    setLoading(true);
+    if (append) setLoadingMore(true);
+    else setLoading(true);
     setError('');
     setSearched(true);
     try {
       const t = types.size > 0 ? [...types].join(',') : undefined;
-      const resp = await globalSearch(q.trim(), t);
+      const resp = await globalSearch(q.trim(), t, PAGE_SIZE, searchOffset);
       // 竞态保护：只有最新请求才更新结果
-      if (reqId !== undefined && reqId !== requestIdRef.current) return;
-      setResults(resp.results);
-      saveToHistory(q.trim());
-      setHistory(loadHistory());
+      if (reqId !== requestIdRef.current) return;
+      if (append) {
+        setResults(prev => [...prev, ...resp.results]);
+      } else {
+        setResults(resp.results);
+      }
+      setTotal(resp.total);
+      setOffset(searchOffset + resp.results.length);
+      if (!append) saveToHistory(q.trim());
+      if (!append) setHistory(loadHistory());
     } catch (err) {
-      if (reqId !== undefined && reqId !== requestIdRef.current) return;
+      if (reqId !== requestIdRef.current) return;
       setError(getApiErrorMessage(err, '搜索失败，请检查后端服务。'));
     } finally {
-      if (reqId === undefined || reqId === requestIdRef.current) setLoading(false);
+      if (reqId === requestIdRef.current) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
   }, []);
 
+  // 新搜索（重置分页）
   const handleSearch = () => {
     const reqId = ++requestIdRef.current;
-    syncUrl(query, activeTypes);
-    doSearch(query, activeTypes, reqId);
+    syncUrl(query, activeTypes, 0);
+    setOffset(0);
+    doSearch(query, activeTypes, reqId, false, 0);
     setShowSuggestions(false);
+  };
+
+  // 加载更多
+  const handleLoadMore = () => {
+    const reqId = ++requestIdRef.current;
+    syncUrl(query, activeTypes, offset);
+    doSearch(query, activeTypes, reqId, true, offset);
   };
 
   // 输入防抖（300ms）+ 竞态保护
@@ -97,38 +130,51 @@ export default function SearchPage() {
     if (value.trim()) {
       debounceRef.current = setTimeout(() => {
         const reqId = ++requestIdRef.current;
-        syncUrl(value, activeTypes);
-        doSearch(value, activeTypes, reqId);
+        setOffset(0);
+        syncUrl(value, activeTypes, 0);
+        doSearch(value, activeTypes, reqId, false, 0);
       }, 300);
     } else {
       setResults([]);
+      setTotal(0);
+      setOffset(0);
       setSearched(false);
       setUrlParams({}, { replace: true });
     }
   };
 
-  // 类型筛选变化时重新搜索
+  // 类型筛选变化时重新搜索（重置分页）
   const toggleType = (t: string) => {
-    setActiveTypes(prev => {
-      const next = new Set(prev);
-      if (next.has(t)) next.delete(t);
-      else next.add(t);
-      // 同步 URL 并重新搜索
-      syncUrl(query, next);
-      if (query.trim()) {
-        const reqId = ++requestIdRef.current;
-        setTimeout(() => doSearch(query, next, reqId), 0);
-      }
-      return next;
-    });
+    const next = new Set(activeTypes);
+    if (next.has(t)) next.delete(t);
+    else next.add(t);
+    setActiveTypes(next);
+    setOffset(0);
+    syncUrl(query, next, 0);
+    if (query.trim()) {
+      const reqId = ++requestIdRef.current;
+      doSearch(query, next, reqId, false, 0);
+    }
+  };
+
+  const handleClearTypes = () => {
+    const next = new Set<string>();
+    setActiveTypes(next);
+    setOffset(0);
+    syncUrl(query, next, 0);
+    if (query.trim()) {
+      const reqId = ++requestIdRef.current;
+      doSearch(query, next, reqId, false, 0);
+    }
   };
 
   const handleSelectHistory = (h: string) => {
     setQuery(h);
     setShowSuggestions(false);
+    setOffset(0);
     const reqId = ++requestIdRef.current;
-    syncUrl(h, activeTypes);
-    doSearch(h, activeTypes, reqId);
+    syncUrl(h, activeTypes, 0);
+    doSearch(h, activeTypes, reqId, false, 0);
   };
 
   const handleClearHistory = () => {
@@ -146,26 +192,21 @@ export default function SearchPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // 首次加载时如果有 URL 参数则自动搜索
+  // 首次加载时如果有 URL 参数则自动搜索（恢复分页状态）
   useEffect(() => {
     const q = urlParams.get('q');
-    if (q && !searched) {
-      const reqId = ++requestIdRef.current;
-      globalSearch(q, activeTypes.size > 0 ? [...activeTypes].join(',') : undefined)
-        .then(resp => {
-          if (reqId === requestIdRef.current) {
-            setResults(resp.results);
-            setSearched(true);
-            saveToHistory(q);
-            setHistory(loadHistory());
-          }
-        })
-        .catch(err => {
-          if (reqId === requestIdRef.current) {
-            setError(getApiErrorMessage(err, '搜索失败，请检查后端服务。'));
-            setSearched(true);
-          }
+    if (q) {
+      const savedOffset = parseInt(urlParams.get('offset') || '0', 10) || 0;
+      if (savedOffset > 0) {
+        // 恢复分页：先搜索第一页，再加载更多到保存的偏移量
+        const reqId = ++requestIdRef.current;
+        doSearch(q, activeTypes, reqId, false, 0).then(() => {
+          // 如果保存的 offset > PAGE_SIZE，后续加载由用户点击"加载更多"
         });
+      } else {
+        const reqId = ++requestIdRef.current;
+        doSearch(q, activeTypes, reqId, false, 0);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -180,6 +221,8 @@ export default function SearchPage() {
   for (const r of results) {
     typeCounts[r.type] = (typeCounts[r.type] || 0) + 1;
   }
+
+  const hasMore = results.length < total;
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -227,12 +270,18 @@ export default function SearchPage() {
           </button>
         ))}
         {activeTypes.size > 0 && (
-          <button onClick={() => { setActiveTypes(new Set()); syncUrl(query, new Set()); }} className="px-2 py-1 text-xs text-gray-400 hover:text-gray-600">清除筛选</button>
+          <button onClick={handleClearTypes} className="px-2 py-1 text-xs text-gray-400 hover:text-gray-600">清除筛选</button>
         )}
       </div>
 
       {error && (
         <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">{error}</div>
+      )}
+
+      {searched && !loading && !error && query.trim() && (
+        <div className="mb-3 text-xs text-gray-400">
+          共找到 {total} 条结果{results.length < total ? `（已加载 ${results.length} 条）` : ''}
+        </div>
       )}
 
       {loading ? (
@@ -260,6 +309,17 @@ export default function SearchPage() {
               </div>
             );
           })}
+          {hasMore && (
+            <div className="text-center pt-2">
+              <button
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+                className="px-5 py-2 text-sm text-blue-600 dark:text-blue-400 border border-blue-300 dark:border-blue-600 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/30 disabled:opacity-50"
+              >
+                {loadingMore ? '加载中...' : '加载更多'}
+              </button>
+            </div>
+          )}
         </div>
       ) : null}
     </div>

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, getApiErrorMessage } from '../api/client';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { uploadMaterial, listMaterials, searchMaterials, deleteMaterial, getMaterial, bulkDeleteMaterials, exportSelectedMaterials, retryMaterial, getApiErrorMessage } from '../api/client';
 import type { MaterialItem, MaterialDetail, MaterialSearchResult } from '../api/client';
 import FileUpload from '../components/FileUpload';
 import MaterialDetailModal from '../components/MaterialDetailModal';
@@ -32,6 +32,13 @@ function HighlightedSnippet({ text }: { text: string }): ReactNode {
 
 const PAGE_SIZE = 20;
 
+const STATUS_LABELS: Record<string, { label: string; color: string }> = {
+  pending: { label: '等待解析', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300' },
+  processing: { label: '解析中', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
+  ready: { label: '就绪', color: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' },
+  failed: { label: '解析失败', color: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+};
+
 function fetchFirstMaterials(): Promise<MaterialItem[]> {
   return listMaterials(PAGE_SIZE, 0);
 }
@@ -57,6 +64,37 @@ export default function Materials() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [exportingSelected, setExportingSelected] = useState(false);
+
+  // Retry
+  const [retryingId, setRetryingId] = useState<number | null>(null);
+
+  // Polling for pending/processing materials
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return;
+    pollRef.current = setInterval(async () => {
+      try {
+        const items = await listMaterials(100, 0);
+        setMaterials(prev => {
+          const map = new Map(items.map(m => [m.id, m]));
+          return prev.map(m => map.get(m.id) || m);
+        });
+        // 如果没有 pending/processing 的材料了，停止轮询
+        const hasActive = items.some(m => m.status === 'pending' || m.status === 'processing');
+        if (!hasActive && pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } catch { /* ignore poll errors */ }
+    }, 2000);
+  }, []);
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+  useEffect(() => stopPolling, [stopPolling]);
 
   useEffect(() => {
     run(() => fetchFirstMaterials()).then(items => {
@@ -110,6 +148,7 @@ export default function Materials() {
       return;
     }
     await loadFirstPage();
+    startPolling();
   };
 
   const handleSearch = async () => {
@@ -220,6 +259,21 @@ export default function Materials() {
       setError(getApiErrorMessage(err, '导出失败，请检查后端服务。'));
     } finally {
       setExportingSelected(false);
+    }
+  };
+
+  const handleRetry = async (id: number) => {
+    if (retryingId === id) return;
+    setError('');
+    setRetryingId(id);
+    try {
+      const updated = await retryMaterial(id);
+      setMaterials(prev => prev.map(m => m.id === id ? { ...m, ...updated } : m));
+      startPolling();
+    } catch (err) {
+      setError(getApiErrorMessage(err, '重试失败，请检查后端服务。'));
+    } finally {
+      setRetryingId(null);
     }
   };
 
@@ -361,11 +415,23 @@ export default function Materials() {
                     {typeLabel[m.file_type] || m.file_type}
                   </span>
                   <span className="text-sm text-gray-700 dark:text-gray-300">{m.filename}</span>
+                  {(() => {
+                    const st = STATUS_LABELS[m.status] || STATUS_LABELS.ready;
+                    return <span className={`px-1.5 py-0.5 rounded text-[10px] ${st.color}`}>{st.label}</span>;
+                  })()}
+                  {m.status === 'failed' && m.error_message && (
+                    <span className="text-[10px] text-red-400 truncate max-w-[200px]" title={m.error_message}>{m.error_message}</span>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-gray-400">
                     {m.created_at ? new Date(m.created_at).toLocaleDateString() : ''}
                   </span>
+                  {m.status === 'failed' && (
+                    <button onClick={() => handleRetry(m.id)} disabled={retryingId === m.id} className="text-orange-500 hover:text-orange-700 disabled:opacity-50 text-sm">
+                      {retryingId === m.id ? '重试中...' : '重试'}
+                    </button>
+                  )}
                   <button onClick={() => handleViewDetail(m.id)} disabled={detailLoadingId === m.id || deletingId === m.id} className="text-blue-500 hover:text-blue-700 disabled:opacity-50 text-sm">
                     {detailLoadingId === m.id ? '加载中...' : '查看'}
                   </button>

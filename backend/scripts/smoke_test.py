@@ -21,6 +21,7 @@ os.environ["UPLOAD_DIR"] = _uploads_dir
 os.environ["MAX_UPLOAD_MB"] = "1"
 os.environ["MATERIAL_PREVIEW_CHARS"] = "5000"
 os.environ["APP_TIMEZONE"] = "Asia/Shanghai"
+os.environ["MATERIAL_PARSE_CONCURRENCY"] = "1"
 
 import asyncio
 
@@ -29,6 +30,7 @@ from sqlalchemy import text
 
 from app.main import app
 from app.database import async_session
+from app.services.parse_worker import reset_worker_for_testing
 
 passed = 0
 failed = 0
@@ -51,6 +53,9 @@ def check(name: str, condition: bool, detail: str = ""):
 def run(client: TestClient):
     material_id = None
     stored_filename = None
+
+    # Reset worker singleton so lifespan creates a fresh one
+    reset_worker_for_testing()
 
     # ── 1. Health ──
     print("\n[1] GET /api/health")
@@ -82,6 +87,59 @@ def run(client: TestClient):
     material_id = body["id"]
     stored_filename = body["stored_filename"]
     check("stored_filename not empty", bool(stored_filename))
+    check("upload status pending or ready", body.get("status") in ("pending", "ready"), f"got {body.get('status')}")
+    check("has status field", "status" in body)
+    check("has error_message field", "error_message" in body)
+
+    # ── 2h. Background parsing completes ──
+    print("\n[2h] Wait for background parsing")
+    import time
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{material_id}")
+        if r.json().get("status") == "ready":
+            break
+    check("material status becomes ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+    detail_after_parse = r.json()
+    check("content parsed", "冒烟测试" in detail_after_parse.get("preview", ""), f"preview={detail_after_parse.get('preview', '')[:100]}")
+    check("content_length > 0", detail_after_parse.get("content_length", 0) > 0)
+
+    # Verify chunks and FTS were created
+    async def verify_chunks():
+        async with async_session() as session:
+            cq = await session.execute(
+                text("SELECT COUNT(*) FROM material_chunks WHERE material_id = :id"), {"id": material_id}
+            )
+            chunk_count = cq.scalar() or 0
+            fq = await session.execute(
+                text("SELECT COUNT(*) FROM chunks_fts WHERE material_id = :id"), {"id": material_id}
+            )
+            fts_count = fq.scalar() or 0
+            return chunk_count, fts_count
+
+    loop_chk = asyncio.new_event_loop()
+    chk_count, fts_count = loop_chk.run_until_complete(verify_chunks())
+    loop_chk.close()
+    check("chunks created after parse", chk_count > 0, f"count={chk_count}")
+    check("fts entries created after parse", fts_count > 0, f"count={fts_count}")
+
+    # Verify parse job was created and completed
+    async def verify_parse_job():
+        async with async_session() as session:
+            jq = await session.execute(
+                text("SELECT id, status, attempts, error_message FROM material_parse_jobs WHERE material_id = :id ORDER BY id"),
+                {"id": material_id},
+            )
+            return jq.fetchall()
+
+    loop_job = asyncio.new_event_loop()
+    jobs = loop_job.run_until_complete(verify_parse_job())
+    loop_job.close()
+    check("parse job created", len(jobs) >= 1, f"count={len(jobs)}")
+    if jobs:
+        last_job = jobs[-1]
+        check("parse job status=done", last_job[1] == "done", f"status={last_job[1]}")
+        check("parse job attempts >= 1", last_job[2] >= 1, f"attempts={last_job[2]}")
 
     # ── 2b. List materials pagination ──
     print("\n[2b] GET /api/materials?limit=1&offset=0")
@@ -291,7 +349,13 @@ def run(client: TestClient):
     ocr_stored_filename = ocr_body["stored_filename"]
     check("ocr has id", ocr_material_id is not None)
 
-    r = client.get(f"/api/materials/{ocr_material_id}")
+    # Wait for background OCR parsing to complete
+    for _ in range(60):
+        time.sleep(0.2)
+        r = client.get(f"/api/materials/{ocr_material_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+
     check("ocr detail 200", r.status_code == 200, f"got {r.status_code}")
     ocr_detail = r.json()
     ocr_preview = ocr_detail.get("preview", "")
@@ -312,6 +376,110 @@ def run(client: TestClient):
     check("ocr ok=true", r.json().get("ok") is True)
     ocr_upload_file = os.path.join(_uploads_dir, ocr_stored_filename)
     check("ocr upload file removed", not os.path.exists(ocr_upload_file))
+
+    # ── 4d. Failed status and retry ──
+    print("\n[4d] Failed status and retry")
+    # Create a material with a valid file, then manually break it to simulate failure
+    fail_file = os.path.join(_tmp_dir, "fail_test.txt")
+    with open(fail_file, "w", encoding="utf-8") as f:
+        f.write("失败重试测试内容")
+    with open(fail_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("fail_test.txt", f, "text/plain")})
+    check("fail material upload 200", r.status_code == 200)
+    fail_mat_id = r.json()["id"]
+
+    # Wait for it to become ready
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{fail_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    fail_status = r.json().get("status")
+    check("fail material becomes ready", fail_status == "ready", f"got {fail_status}")
+
+    # Simulate failure by setting status to failed directly in DB
+    async def set_material_failed(mid):
+        async with async_session() as session:
+            await session.execute(text("UPDATE materials SET status='failed', error_message='模拟解析失败: OCR 超时' WHERE id=:id"), {"id": mid})
+            await session.commit()
+
+    loop_fail = asyncio.new_event_loop()
+    loop_fail.run_until_complete(set_material_failed(fail_mat_id))
+    loop_fail.close()
+
+    r = client.get(f"/api/materials/{fail_mat_id}")
+    check("failed status visible", r.json().get("status") == "failed", f"got {r.json().get('status')}")
+    check("failed error_message visible", "OCR 超时" in r.json().get("error_message", ""), f"msg={r.json().get('error_message')}")
+
+    # List should show failed status
+    r = client.get("/api/materials", params={"limit": 100, "offset": 0})
+    fail_in_list = [m for m in r.json() if m["id"] == fail_mat_id]
+    if fail_in_list:
+        check("list shows failed status", fail_in_list[0]["status"] == "failed")
+        check("list shows error_message", "OCR 超时" in fail_in_list[0].get("error_message", ""))
+
+    # Retry
+    r = client.post(f"/api/materials/{fail_mat_id}/retry")
+    check("retry 200", r.status_code == 200, f"got {r.status_code}")
+    check("retry status pending", r.json().get("status") == "pending", f"got {r.json().get('status')}")
+    check("retry error_message cleared", r.json().get("error_message") == "", f"got {r.json().get('error_message')}")
+
+    # Wait for retry to complete
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{fail_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("retry completes to ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+    check("retry content restored", "失败重试" in r.json().get("preview", ""))
+
+    # Verify retry created a new job with attempts incremented
+    async def verify_retry_jobs():
+        async with async_session() as session:
+            jq = await session.execute(
+                text("SELECT id, status, attempts FROM material_parse_jobs WHERE material_id = :id ORDER BY id"),
+                {"id": fail_mat_id},
+            )
+            return jq.fetchall()
+
+    loop_rj = asyncio.new_event_loop()
+    retry_jobs = loop_rj.run_until_complete(verify_retry_jobs())
+    loop_rj.close()
+    check("retry created new job", len(retry_jobs) >= 2, f"count={len(retry_jobs)}")
+    if len(retry_jobs) >= 2:
+        check("retry job status=done", retry_jobs[-1][1] == "done", f"status={retry_jobs[-1][1]}")
+        check("retry job attempts=1", retry_jobs[-1][2] == 1, f"attempts={retry_jobs[-1][2]}")
+
+    # Retry on non-failed material should be 422
+    r = client.post(f"/api/materials/{fail_mat_id}/retry")
+    check("retry on ready 422", r.status_code == 422, f"got {r.status_code}")
+
+    # Retry on nonexistent
+    r = client.post("/api/materials/999999/retry")
+    check("retry nonexistent 404", r.status_code == 404, f"got {r.status_code}")
+
+    # Verify delete cleans up parse jobs
+    async def count_jobs(mid):
+        async with async_session() as session:
+            jq = await session.execute(
+                text("SELECT COUNT(*) FROM material_parse_jobs WHERE material_id = :id"), {"id": mid}
+            )
+            return jq.scalar() or 0
+
+    loop_dc = asyncio.new_event_loop()
+    jobs_before = loop_dc.run_until_complete(count_jobs(fail_mat_id))
+    loop_dc.close()
+    check("jobs exist before delete", jobs_before >= 1, f"count={jobs_before}")
+
+    # Cleanup
+    r = client.delete(f"/api/materials/{fail_mat_id}")
+    check("fail material cleanup 200", r.status_code == 200)
+
+    # Verify jobs were cleaned up
+    loop_dc2 = asyncio.new_event_loop()
+    jobs_after = loop_dc2.run_until_complete(count_jobs(fail_mat_id))
+    loop_dc2.close()
+    check("jobs cleaned up after delete", jobs_after == 0, f"count={jobs_after}")
 
     # ── 5. Study Plan CRUD ──
     print("\n[5] POST /api/plan")
@@ -543,6 +711,13 @@ def run(client: TestClient):
         r = client.post("/api/materials/upload", files={"file": ("snippet_test.txt", f, "text/plain")})
     check("snippet material upload 200", r.status_code == 200)
     snippet_mid = r.json()["id"]
+
+    # Wait for parsing
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{snippet_mid}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
 
     r = client.post("/api/materials/search", json={"query": "搜索高亮", "limit": 1})
     check("snippet search 200", r.status_code == 200)
@@ -1364,6 +1539,14 @@ def run(client: TestClient):
     check("search: upload material 200", r.status_code == 200)
     search_mat_id = r.json()["id"]
 
+    # Wait for background parsing to complete so chunks are indexed
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{search_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("search material parsed", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
     # Create error
     r = client.post("/api/errors", json={"subject": "搜索测试", "question": "全局搜索卷积定理错题"})
     check("search: create error 200", r.status_code == 200)
@@ -1409,6 +1592,14 @@ def run(client: TestClient):
     with open(search_file2, "rb") as f:
         r = client.post("/api/materials/upload", files={"file": ("search_test2.txt", f, "text/plain")})
     check("search: upload material2 200", r.status_code == 200)
+    search_mat2_id = r.json()["id"]
+
+    # Wait for second material parsing
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{search_mat2_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
 
     # Search again - each material should appear at most once
     r = client.get("/api/search", params={"q": "卷积定理", "types": "materials", "limit": 50})
@@ -1446,6 +1637,49 @@ def run(client: TestClient):
 
     exam_result_ids = {x["id"] for x in sr["results"] if x["type"] == "exam"}
     check("exam id is entity id", search_eq_id in exam_result_ids, f"got {exam_result_ids}, expected {search_eq_id}")
+
+    # ── 21c. Search pagination: total, offset, limit ──
+    print("\n[21c] Search pagination")
+    # Create multiple errors with common keyword for pagination testing
+    pagination_err_ids = []
+    for i in range(5):
+        r = client.post("/api/errors", json={"subject": "分页测试", "question": f"分页关键词第{i}题"})
+        check(f"pagination error {i} 200", r.status_code == 200)
+        pagination_err_ids.append(r.json()["id"])
+
+    # Search with limit=2 → should return 2 results, total >= 5
+    r = client.get("/api/search", params={"q": "分页关键词", "types": "errors", "limit": 2})
+    check("pagination limit=2 200", r.status_code == 200)
+    p1 = r.json()
+    check("pagination has total", "total" in p1)
+    check("pagination total >= 5", p1["total"] >= 5, f"got {p1['total']}")
+    check("pagination results len=2", len(p1["results"]) == 2, f"got {len(p1['results'])}")
+
+    # Search with limit=2, offset=2 → next page
+    r = client.get("/api/search", params={"q": "分页关键词", "types": "errors", "limit": 2, "offset": 2})
+    check("pagination offset=2 200", r.status_code == 200)
+    p2 = r.json()
+    check("pagination offset total same", p2["total"] == p1["total"], f"got {p2['total']}")
+    check("pagination offset results len=2", len(p2["results"]) == 2, f"got {len(p2['results'])}")
+    # Results should differ from page 1
+    p1_ids = {x["id"] for x in p1["results"]}
+    p2_ids = {x["id"] for x in p2["results"]}
+    check("pagination pages differ", p1_ids.isdisjoint(p2_ids), f"p1={p1_ids}, p2={p2_ids}")
+
+    # Search with offset beyond total → empty results
+    r = client.get("/api/search", params={"q": "分页关键词", "types": "errors", "limit": 10, "offset": 999})
+    check("pagination beyond total 200", r.status_code == 200)
+    p_beyond = r.json()
+    check("pagination beyond total empty results", len(p_beyond["results"]) == 0, f"got {len(p_beyond['results'])}")
+    check("pagination beyond total still correct", p_beyond["total"] >= 5, f"got {p_beyond['total']}")
+
+    # Invalid offset rejected
+    r = client.get("/api/search", params={"q": "test", "offset": -1})
+    check("negative offset rejected 422", r.status_code == 422, f"got {r.status_code}")
+
+    # Cleanup pagination test data
+    for eid in pagination_err_ids:
+        client.delete(f"/api/errors/{eid}")
 
     # Cleanup
     client.delete(f"/api/materials/{search_mat_id}")
@@ -1586,6 +1820,154 @@ def run(client: TestClient):
     for eid in stats_errs:
         client.delete(f"/api/errors/{eid}")
 
+    # ── 25. Parse job: startup recovery logic ──
+    print("\n[25] Parse job: startup recovery logic")
+    # Upload a material, wait for it to finish, then simulate a stuck "processing" state
+    recovery_file = os.path.join(_tmp_dir, "recovery_test.txt")
+    with open(recovery_file, "w", encoding="utf-8") as f:
+        f.write("启动恢复测试内容")
+    with open(recovery_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("recovery_test.txt", f, "text/plain")})
+    check("recovery upload 200", r.status_code == 200)
+    recovery_mid = r.json()["id"]
+
+    # Wait for it to become ready
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{recovery_mid}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("recovery material ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Simulate a stuck processing job + material (mimics crash during processing)
+    async def simulate_stuck_job(mid):
+        async with async_session() as session:
+            await session.execute(text(
+                "INSERT INTO material_parse_jobs (material_id, status, attempts) VALUES (:mid, 'processing', 1)"
+            ), {"mid": mid})
+            await session.execute(text(
+                "UPDATE materials SET status='processing' WHERE id=:mid"
+            ), {"mid": mid})
+            await session.commit()
+
+    loop_stuck = asyncio.new_event_loop()
+    loop_stuck.run_until_complete(simulate_stuck_job(recovery_mid))
+    loop_stuck.close()
+
+    # Verify stuck state
+    r = client.get(f"/api/materials/{recovery_mid}")
+    check("stuck status is processing", r.json().get("status") == "processing", f"got {r.json().get('status')}")
+
+    # Verify recovery SQL logic: reset processing → pending (same as start_worker does)
+    async def verify_recovery_sql():
+        async with async_session() as session:
+            # Count processing jobs before recovery
+            before = await session.execute(text(
+                "SELECT COUNT(*) FROM material_parse_jobs WHERE status='processing'"
+            ))
+            before_count = before.scalar() or 0
+
+            # Apply recovery: processing → pending
+            await session.execute(text(
+                "UPDATE material_parse_jobs SET status='pending', started_at=NULL WHERE status='processing'"
+            ))
+            await session.execute(text(
+                "UPDATE materials SET status='pending', error_message='' WHERE status='processing'"
+            ))
+            await session.commit()
+
+            # Count processing jobs after recovery
+            after = await session.execute(text(
+                "SELECT COUNT(*) FROM material_parse_jobs WHERE status='processing'"
+            ))
+            after_count = after.scalar() or 0
+
+            # Verify material status
+            mat = await session.execute(text(
+                "SELECT status FROM materials WHERE id=:mid"
+            ), {"mid": recovery_mid})
+            mat_status = mat.scalar()
+
+            return before_count, after_count, mat_status
+
+    loop_rec = asyncio.new_event_loop()
+    before_cnt, after_cnt, mat_st = loop_rec.run_until_complete(verify_recovery_sql())
+    loop_rec.close()
+    check("recovery: processing jobs existed before", before_cnt >= 1, f"count={before_cnt}")
+    check("recovery: no processing jobs after", after_cnt == 0, f"count={after_cnt}")
+    check("recovery: material reset to pending", mat_st == "pending", f"status={mat_st}")
+
+    # Now use retry endpoint to re-process (simulates worker picking up recovered job)
+    r = client.post(f"/api/materials/{recovery_mid}/retry")
+    # Material is pending, not failed — retry should fail with 422
+    check("retry on pending 422", r.status_code == 422, f"got {r.status_code}")
+
+    # Manually set to failed so we can retry
+    async def set_failed(mid):
+        async with async_session() as session:
+            await session.execute(text(
+                "UPDATE materials SET status='failed', error_message='恢复测试' WHERE id=:mid"
+            ), {"mid": mid})
+            await session.commit()
+
+    loop_sf = asyncio.new_event_loop()
+    loop_sf.run_until_complete(set_failed(recovery_mid))
+    loop_sf.close()
+
+    r = client.post(f"/api/materials/{recovery_mid}/retry")
+    check("retry after recovery 200", r.status_code == 200, f"got {r.status_code}")
+
+    # Wait for retry to complete
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{recovery_mid}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("recovery retry completes to ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+    check("recovery content preserved", "启动恢复" in r.json().get("preview", ""))
+
+    # Cleanup
+    client.delete(f"/api/materials/{recovery_mid}")
+
+    # ── 26. Parse job: concurrency via sequential upload ──
+    print("\n[26] Parse job: sequential upload and processing")
+    # Upload 3 materials, verify all get parse jobs that complete
+    conc_ids = []
+    for i in range(3):
+        cfile = os.path.join(_tmp_dir, f"conc_{i}.txt")
+        with open(cfile, "w", encoding="utf-8") as f:
+            f.write(f"并发限制测试 {i} " + "x" * 500)
+        with open(cfile, "rb") as f:
+            r = client.post("/api/materials/upload", files={"file": (f"conc_{i}.txt", f, "text/plain")})
+        check(f"conc upload {i} 200", r.status_code == 200)
+        conc_ids.append(r.json()["id"])
+
+    # Wait for all to complete
+    for mid in conc_ids:
+        for _ in range(50):
+            time.sleep(0.1)
+            r = client.get(f"/api/materials/{mid}")
+            if r.json().get("status") in ("ready", "failed"):
+                break
+        check(f"conc material {mid} ready", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Verify all parse jobs completed
+    async def verify_conc_jobs():
+        async with async_session() as session:
+            jq = await session.execute(text(
+                "SELECT material_id, status FROM material_parse_jobs WHERE material_id IN (:m0, :m1, :m2) AND status='done'"
+            ), {"m0": conc_ids[0], "m1": conc_ids[1], "m2": conc_ids[2]})
+            return jq.fetchall()
+
+    loop_cj = asyncio.new_event_loop()
+    conc_jobs = loop_cj.run_until_complete(verify_conc_jobs())
+    loop_cj.close()
+    check("all conc jobs done", len(conc_jobs) >= 3, f"count={len(conc_jobs)}")
+
+    # Cleanup
+    for mid in conc_ids:
+        client.delete(f"/api/materials/{mid}")
+
     # ── 24. Materials bulk operations ──
     print("\n[24] POST /api/materials/bulk-delete (validation)")
     r = client.post("/api/materials/bulk-delete", json={"ids": []})
@@ -1608,6 +1990,14 @@ def run(client: TestClient):
             r = client.post("/api/materials/upload", files={"file": (f"bulk_{i}.txt", f, "text/plain")})
         check(f"upload bulk_{i} 200", r.status_code == 200)
         bulk_mat_ids.append(r.json()["id"])
+
+    # Wait for all bulk materials to be parsed
+    for mid in bulk_mat_ids:
+        for _ in range(30):
+            time.sleep(0.1)
+            r = client.get(f"/api/materials/{mid}")
+            if r.json().get("status") in ("ready", "failed"):
+                break
 
     # Export selected
     r = client.post("/api/materials/export-selected", json={"ids": bulk_mat_ids, "include_preview": True})

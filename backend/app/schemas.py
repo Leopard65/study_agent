@@ -49,6 +49,8 @@ class MaterialItem(BaseModel):
     filename: str
     file_type: str
     stored_filename: Optional[str] = ""
+    status: str = "ready"
+    error_message: str = ""
     created_at: Optional[datetime] = None
 
     class Config:
@@ -63,6 +65,8 @@ class MaterialDetail(BaseModel):
     preview: str = ""
     content_length: int = 0
     truncated: bool = False
+    status: str = "ready"
+    error_message: str = ""
     created_at: Optional[datetime] = None
 
     class Config:
