@@ -30,6 +30,7 @@ export default function CommandPalette({ open, onClose, onExport }: Props) {
     { id: 'errors', label: '打开错题本', hint: '/errors', action: () => { navigate('/errors'); onClose(); } },
     { id: 'plan', label: '打开学习计划', hint: '/plan', action: () => { navigate('/plan'); onClose(); } },
     { id: 'exam', label: '打开真题练习', hint: '/exam', action: () => { navigate('/exam'); onClose(); } },
+    { id: 'review', label: '今日复习队列', hint: '/review', action: () => { navigate('/review'); onClose(); } },
     { id: 'timer', label: '开始专注计时', hint: '跳转到工作台', action: () => { navigate('/?focus=timer'); onClose(); } },
     { id: 'export', label: '导出数据备份', hint: '下载 JSON 文件', action: () => { onExport(); onClose(); } },
   ];

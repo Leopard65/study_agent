@@ -70,6 +70,12 @@ def run(client: TestClient):
     check("has ocr_available", "ocr_available" in data)
     check("database ok", data["database"] == "ok")
     check("upload_dir ok", data["upload_dir"] == "ok")
+    check("ai_configured is bool", isinstance(data["ai_configured"], bool), f"got {type(data['ai_configured'])}")
+
+    # Verify placeholder key detection
+    from app.config import is_ai_configured, _PLACEHOLDER_KEYS
+    for placeholder in ["", "your_api_key_here", "sk-xxx", "replace_me"]:
+        check(f"placeholder '{placeholder}' in _PLACEHOLDER_KEYS", placeholder in _PLACEHOLDER_KEYS)
 
     # ── 2. Upload material ──
     print("\n[2] POST /api/materials/upload")
@@ -2321,6 +2327,71 @@ def run(client: TestClient):
     client.delete(f"/api/materials/{cancel_mat_id}")
     client.delete(f"/api/materials/{cancel2_mat_id}")
 
+    # ── 28. Upload then immediately delete (race condition) ──
+    print("\n[28] Upload then immediately delete (race condition)")
+    # Upload several materials and delete them while parsing may be in progress
+    race_ids = []
+    for i in range(3):
+        race_file = os.path.join(_tmp_dir, f"race_{i}.txt")
+        with open(race_file, "w", encoding="utf-8") as f:
+            f.write(f"竞态测试内容 {i} " + "x" * 200)
+        with open(race_file, "rb") as f:
+            r = client.post("/api/materials/upload", files={"file": (f"race_{i}.txt", f, "text/plain")})
+        check(f"race upload {i} 200", r.status_code == 200)
+        race_ids.append(r.json()["id"])
+
+    # Immediately delete all (some may still be parsing)
+    for mid in race_ids:
+        r = client.delete(f"/api/materials/{mid}")
+        check(f"race delete {mid} 200", r.status_code == 200, f"got {r.status_code}")
+
+    # Verify all materials are gone
+    for mid in race_ids:
+        r = client.get(f"/api/materials/{mid}")
+        check(f"race material {mid} gone 404", r.status_code == 404, f"got {r.status_code}")
+
+    # Verify no orphaned chunks
+    async def verify_no_race_chunks():
+        async with async_session() as session:
+            for mid in race_ids:
+                cq = await session.execute(
+                    text("SELECT COUNT(*) FROM material_chunks WHERE material_id = :id"), {"id": mid}
+                )
+                count = cq.scalar() or 0
+                if count > 0:
+                    return False, mid
+            return True, None
+
+    loop_race = asyncio.new_event_loop()
+    ok, bad_mid = loop_race.run_until_complete(verify_no_race_chunks())
+    loop_race.close()
+    check("no orphaned chunks after race delete", ok, f"orphaned material_id={bad_mid}")
+
+    # Verify no orphaned parse jobs
+    async def verify_no_race_jobs():
+        async with async_session() as session:
+            for mid in race_ids:
+                jq = await session.execute(
+                    text("SELECT COUNT(*) FROM material_parse_jobs WHERE material_id = :id"), {"id": mid}
+                )
+                count = jq.scalar() or 0
+                if count > 0:
+                    return False, mid
+            return True, None
+
+    loop_rj = asyncio.new_event_loop()
+    ok, bad_mid = loop_rj.run_until_complete(verify_no_race_jobs())
+    loop_rj.close()
+    check("no orphaned parse jobs after race delete", ok, f"orphaned material_id={bad_mid}")
+
+    # Wait briefly for any in-flight worker tasks to finish (should not crash)
+    time.sleep(1)
+
+    # Verify health is still ok (no worker crash)
+    r = client.get("/api/health")
+    check("health ok after race delete", r.status_code == 200)
+    check("health status ok", r.json().get("status") == "ok", f"got {r.json().get('status')}")
+
     # ── 24. Materials bulk operations ──
     print("\n[24] POST /api/materials/bulk-delete (validation)")
     r = client.post("/api/materials/bulk-delete", json={"ids": []})
@@ -2389,6 +2460,208 @@ def run(client: TestClient):
     bd2 = r.json()
     check("bulk delete missing deleted=0", bd2["deleted"] == 0, f"got {bd2['deleted']}")
     check("bulk delete missing=2", bd2["missing"] == 2, f"got {bd2['missing']}")
+
+    # ── 29. Review queue ──
+    print("\n[29] GET /api/review/queue (empty)")
+    r = client.get("/api/review/queue")
+    check("review queue 200", r.status_code == 200, f"got {r.status_code}")
+    rq = r.json()
+    check("queue has items", "items" in rq)
+    check("queue has total_due", "total_due" in rq)
+    check("queue has total_unmastered", "total_unmastered" in rq)
+    check("queue has weak_points", "weak_points" in rq)
+    check("queue has today", "today" in rq)
+    check("queue today is today", rq["today"] == local_today(), f"got {rq['today']}")
+    check("queue empty items", rq["items"] == [])
+    check("queue total_due=0", rq["total_due"] == 0, f"got {rq['total_due']}")
+
+    # ── 29b. Queue with due/overdue/future/mastered errors ──
+    print("\n[29b] Review queue with test data")
+    today_str = local_today()
+    overdue_str = (local_date_obj() - _td(days=3)).isoformat()
+    future_str = (local_date_obj() + _td(days=30)).isoformat()
+
+    # Overdue error (3 days ago)
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "knowledge_point": "极限", "error_type": "计算错误",
+        "question": "逾期错题", "next_review_date": overdue_str,
+    })
+    check("overdue error create 200", r.status_code == 200)
+    overdue_err_id = r.json()["id"]
+
+    # Today-due error
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "knowledge_point": "极限", "error_type": "概念错误",
+        "question": "今日到期错题", "next_review_date": today_str,
+    })
+    check("today error create 200", r.status_code == 200)
+    today_err_id = r.json()["id"]
+
+    # Future error (should NOT appear in queue)
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "question": "未来错题", "next_review_date": future_str,
+    })
+    check("future error create 200", r.status_code == 200)
+    future_err_id = r.json()["id"]
+
+    # Mastered error with today review (should NOT appear — mastered=true)
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "question": "已掌握错题", "next_review_date": today_str,
+    })
+    check("mastered error create 200", r.status_code == 200)
+    mastered_err_id = r.json()["id"]
+    r = client.patch(f"/api/errors/{mastered_err_id}", json={"mastered": True})
+    check("master error 200", r.status_code == 200)
+
+    # Unmastered error with no review date (should NOT appear)
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "question": "无日期错题",
+    })
+    check("nodate error create 200", r.status_code == 200)
+    nodate_err_id = r.json()["id"]
+
+    # Fetch queue
+    r = client.get("/api/review/queue")
+    check("queue with data 200", r.status_code == 200)
+    rq2 = r.json()
+    check("queue total_due=2", rq2["total_due"] == 2, f"got {rq2['total_due']}")
+    check("queue total_unmastered >= 4", rq2["total_unmastered"] >= 4, f"got {rq2['total_unmastered']}")
+    queue_ids = [it["id"] for it in rq2["items"]]
+    check("overdue in queue", overdue_err_id in queue_ids, f"ids={queue_ids}")
+    check("today in queue", today_err_id in queue_ids, f"ids={queue_ids}")
+    check("future NOT in queue", future_err_id not in queue_ids)
+    check("mastered NOT in queue", mastered_err_id not in queue_ids)
+    check("nodate NOT in queue", nodate_err_id not in queue_ids)
+
+    # Verify sorting: overdue first
+    overdue_idx = queue_ids.index(overdue_err_id)
+    today_idx = queue_ids.index(today_err_id)
+    check("overdue before today", overdue_idx < today_idx, f"overdue_idx={overdue_idx}, today_idx={today_idx}")
+
+    # Verify item fields
+    overdue_item = rq2["items"][overdue_idx]
+    check("item has due_days", "due_days" in overdue_item)
+    check("overdue due_days >= 3", overdue_item["due_days"] >= 3, f"got {overdue_item['due_days']}")
+    check("item has priority_reason", "priority_reason" in overdue_item)
+    check("overdue priority mentions 逾期", "逾期" in overdue_item["priority_reason"], f"reason={overdue_item['priority_reason']}")
+
+    today_item = rq2["items"][today_idx]
+    check("today due_days=0", today_item["due_days"] == 0, f"got {today_item['due_days']}")
+
+    # Verify weak_points
+    check("weak_points is list", isinstance(rq2["weak_points"], list))
+    if rq2["weak_points"]:
+        kp_names = [wp["name"] for wp in rq2["weak_points"]]
+        check("weak_points has 极限", "极限" in kp_names, f"kp={kp_names}")
+
+    # ── 29c. Review action: mastered ──
+    print("\n[29c] POST /api/review/{id}/action (mastered)")
+    r = client.post(f"/api/review/{today_err_id}/action", json={"action": "mastered"})
+    check("mastered action 200", r.status_code == 200, f"got {r.status_code}")
+    ma = r.json()
+    check("mastered ok", ma["ok"] is True)
+    check("mastered action=mastered", ma["action"] == "mastered")
+    check("mastered mastered=True", ma["mastered"] is True)
+    check("mastered next_review_date set", bool(ma["next_review_date"]), f"got {ma['next_review_date']}")
+    check("mastered next_review_date > today", ma["next_review_date"] > today_str, f"got {ma['next_review_date']}")
+    check("mastered review_count >= 1", ma["review_count"] >= 1, f"got {ma['review_count']}")
+    saved_review_count = ma["review_count"]
+    saved_next_date = ma["next_review_date"]
+
+    # ── 29c2. Mastered idempotency: second mastered on same error ──
+    print("\n[29c2] POST /api/review/{id}/action (mastered again — idempotent)")
+    r = client.post(f"/api/review/{today_err_id}/action", json={"action": "mastered"})
+    check("mastered2 action 200", r.status_code == 200, f"got {r.status_code}")
+    ma2 = r.json()
+    check("mastered2 still mastered", ma2["mastered"] is True)
+    check("mastered2 review_count unchanged", ma2["review_count"] == saved_review_count, f"got {ma2['review_count']}, expected {saved_review_count}")
+    check("mastered2 next_review_date unchanged", ma2["next_review_date"] == saved_next_date, f"got {ma2['next_review_date']}, expected {saved_next_date}")
+
+    # ── 29d. Review action: again (keeps today) ──
+    print("\n[29d] POST /api/review/{id}/action (again)")
+    r = client.post(f"/api/review/{overdue_err_id}/action", json={"action": "again"})
+    check("again action 200", r.status_code == 200, f"got {r.status_code}")
+    aa = r.json()
+    check("again ok", aa["ok"] is True)
+    check("again mastered=False", aa["mastered"] is False)
+    check("again next_review_date=today", aa["next_review_date"] == today_str, f"got {aa['next_review_date']}")
+
+    # ── 29e. Review action: postpone (defers to tomorrow) ──
+    # Create a fresh due error for postpone test
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "question": "推迟测试错题", "next_review_date": today_str,
+    })
+    check("postpone error create 200", r.status_code == 200)
+    postpone_err_id = r.json()["id"]
+
+    expected_tomorrow = (local_date_obj() + _td(days=1)).isoformat()
+    print("\n[29e] POST /api/review/{id}/action (postpone)")
+    r = client.post(f"/api/review/{postpone_err_id}/action", json={"action": "postpone"})
+    check("postpone action 200", r.status_code == 200, f"got {r.status_code}")
+    pa = r.json()
+    check("postpone ok", pa["ok"] is True)
+    check("postpone mastered=False", pa["mastered"] is False)
+    check("postpone next_review_date=tomorrow", pa["next_review_date"] == expected_tomorrow, f"got {pa['next_review_date']}")
+
+    # ── 29f. Review action: skip ──
+    # Create a fresh due error for skip test
+    r = client.post("/api/errors", json={
+        "subject": "复习队列", "question": "跳过测试错题", "next_review_date": today_str,
+    })
+    check("skip error create 200", r.status_code == 200)
+    skip_err_id = r.json()["id"]
+
+    print("\n[29f] POST /api/review/{id}/action (skip)")
+    r = client.post(f"/api/review/{skip_err_id}/action", json={"action": "skip"})
+    check("skip action 200", r.status_code == 200, f"got {r.status_code}")
+    sa = r.json()
+    check("skip ok", sa["ok"] is True)
+    check("skip action=skip", sa["action"] == "skip")
+    check("skip error_id matches", sa["error_id"] == skip_err_id)
+    check("skip mastered is null", sa.get("mastered") is None)
+    check("skip next_review_date is null", sa.get("next_review_date") is None)
+    check("skip review_count is null", sa.get("review_count") is None)
+
+    # Verify skip did NOT change the error in DB
+    r = client.get("/api/errors", params={"mastered": "false"})
+    skip_err = [e for e in r.json() if e["id"] == skip_err_id]
+    if skip_err:
+        check("skip still unmastered", skip_err[0]["mastered"] is False)
+        check("skip date unchanged", skip_err[0]["next_review_date"] == today_str, f"got {skip_err[0]['next_review_date']}")
+
+    # ── 29g. Review action validation ──
+    print("\n[29g] Review action validation")
+    r = client.post(f"/api/review/{skip_err_id}/action", json={"action": "invalid"})
+    check("invalid action 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/api/review/999999/action", json={"action": "mastered"})
+    check("nonexistent error 404", r.status_code == 404, f"got {r.status_code}")
+
+    # ── 29h. Queue after actions ──
+    print("\n[29h] Queue after actions")
+    r = client.get("/api/review/queue")
+    check("queue after actions 200", r.status_code == 200)
+    rq3 = r.json()
+    remaining_ids = [it["id"] for it in rq3["items"]]
+    check("mastered error removed from queue", today_err_id not in remaining_ids)
+    # again keeps next_review_date=today, so it stays in the queue on reload
+    check("again error still in queue (today date)", overdue_err_id in remaining_ids, f"ids={remaining_ids}")
+    check("postpone error removed from queue (tomorrow)", postpone_err_id not in remaining_ids)
+    check("skip error still in queue (skip=frontend only)", skip_err_id in remaining_ids, f"ids={remaining_ids}")
+
+    # Cleanup review test data
+    for eid in [overdue_err_id, today_err_id, future_err_id, mastered_err_id, nodate_err_id,
+                postpone_err_id, skip_err_id]:
+        client.delete(f"/api/errors/{eid}")
+
+    # ── 29i. Version consistency ──
+    print("\n[29i] Version consistency")
+    from app.main import app as fastapi_app
+    check("FastAPI version=0.4.0", fastapi_app.version == "0.4.0", f"got {fastapi_app.version}")
+
+    # Export should still use BACKUP_SCHEMA_VERSION
+    r = client.get("/api/export/json")
+    check("export version=0.2", r.json().get("version") == "0.2", f"got {r.json().get('version')}")
 
 
 # ── Main ──

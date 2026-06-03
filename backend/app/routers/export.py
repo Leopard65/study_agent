@@ -11,6 +11,13 @@ from app.models import (
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
+# Application display version (shown in Sidebar, FastAPI metadata)
+APP_VERSION = "0.4.0"
+# Backup JSON schema version — used by import for compatibility checks.
+# Do NOT change unless the backup format is intentionally changed;
+# existing backups rely on this string for import validation.
+BACKUP_SCHEMA_VERSION = "0.2"
+
 
 def _dt(v) -> str | None:
     if v is None:
@@ -95,7 +102,7 @@ async def export_json(db: AsyncSession = Depends(get_db)):
 
     return JSONResponse(content={
         "exported_at": datetime.now(timezone.utc).isoformat(),
-        "version": "0.2",
+        "version": BACKUP_SCHEMA_VERSION,
         "materials": materials,
         "material_chunks_count": chunks_count,
         "chat_history": chat_history,

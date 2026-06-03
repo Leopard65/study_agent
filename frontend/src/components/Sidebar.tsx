@@ -13,6 +13,7 @@ const links = [
   { to: '/errors', label: '错题本', icon: '📝' },
   { to: '/plan', label: '学习计划', icon: '📅' },
   { to: '/exam', label: '真题练习', icon: '📋' },
+  { to: '/review', label: '今日复习', icon: '🔄' },
   { to: '/search', label: '全局搜索', icon: '🔍' },
 ];
 
@@ -148,19 +149,19 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
     }
   };
 
-  let statusText = '服务正常';
+  let statusText = '运行正常';
   let statusColor = 'text-green-400';
   if (checking) {
-    statusText = '检查中...';
+    statusText = '检查中…';
     statusColor = 'text-gray-500';
   } else if (!health) {
-    statusText = '服务异常';
+    statusText = '后端未启动';
     statusColor = 'text-red-400';
   } else if (health.status !== 'ok') {
-    statusText = '服务异常';
+    statusText = '后端异常';
     statusColor = 'text-red-400';
   } else if (!health.ai_configured) {
-    statusText = '未配置 AI';
+    statusText = '需配置 API Key';
     statusColor = 'text-yellow-400';
   }
 
@@ -258,13 +259,13 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
 
         {!sidebarCollapsed && (
           <>
-            <div className="text-gray-500 mt-2">MVP v0.2</div>
+            <div className="text-gray-500 mt-2">MVP v0.4</div>
             <div className={`mt-1 ${statusColor}`}>{statusText}</div>
           </>
         )}
         {sidebarCollapsed && (
           <div className={`mt-1 text-center ${statusColor}`} title={statusText}>
-            {checking ? '⏳' : health?.status === 'ok' ? '✅' : '❌'}
+            {checking ? '⏳' : !health || health.status !== 'ok' ? '❌' : !health.ai_configured ? '⚠️' : '✅'}
           </div>
         )}
 

@@ -5,12 +5,14 @@
 - ParseWorker 单例：asyncio.Queue + Semaphore 控制并发
 - 启动时恢复：processing → pending，然后拉取 pending 任务
 - upload/retry 创建 job 后调用 worker.enqueue(material_id)
+- 删除资料时 job 会被级联删除，worker 对已删除的记录安全退出
 """
 import asyncio
 import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 
 from app.database import async_session
 from app.models import Material, MaterialParseJob
@@ -110,13 +112,17 @@ class ParseWorker:
 
     async def _update_progress(self, job_id: int, current: int, total: int, message: str) -> None:
         """更新 job 的进度字段（轻量，不改 status）。"""
-        async with async_session() as session:
-            job = await session.get(MaterialParseJob, job_id)
-            if job and job.status == "processing":
-                job.progress_current = current
-                job.progress_total = total
-                job.progress_message = message
-                await session.commit()
+        try:
+            async with async_session() as session:
+                job = await session.get(MaterialParseJob, job_id)
+                if job and job.status == "processing":
+                    job.progress_current = current
+                    job.progress_total = total
+                    job.progress_message = message
+                    await session.commit()
+        except (IntegrityError, InvalidRequestError):
+            # Job was deleted (e.g. user deleted material) — safe to ignore
+            pass
 
     async def _process_one(self, material_id: int) -> None:
         """处理单个 material 的解析任务。"""
@@ -177,6 +183,8 @@ class ParseWorker:
             async with async_session() as session:
                 material = await session.get(Material, material_id)
                 if not material:
+                    # Material was deleted while parsing — quiet exit
+                    logger.info("Material %d deleted during parse, discarding result", material_id)
                     return
                 material.content = text_content
                 await delete_chunks_for_material(session, material_id)
@@ -198,20 +206,32 @@ class ParseWorker:
                 await session.commit()
                 logger.info("Material %d parsed (%d chars, attempt %d)", material_id, len(text_content), job.attempts if job else -1)
 
+        except (IntegrityError, InvalidRequestError):
+            # Material/job was deleted during parse (user action) — quiet exit
+            logger.info("Material %d or its parse job deleted during parse, skipping", material_id)
         except Exception as e:
+            # Check if the material/job was deleted — if so, this is expected, not an error
+            try:
+                async with async_session() as session:
+                    material = await session.get(Material, material_id)
+                    job = await session.get(MaterialParseJob, job_id)
+                    if not material and not job:
+                        logger.info("Material %d deleted during parse (error path), skipping", material_id)
+                        return
+                    # Real error — mark as failed
+                    if material:
+                        material.status = "failed"
+                        material.error_message = str(e)[:500]
+                    if job:
+                        job.status = "failed"
+                        job.error_message = str(e)[:500]
+                        job.progress_message = f"失败：{str(e)[:100]}"
+                        job.finished_at = _utcnow()
+                    await session.commit()
+            except (IntegrityError, InvalidRequestError):
+                logger.info("Material %d deleted during parse error handling, skipping", material_id)
+                return
             logger.exception("Failed to parse material %d", material_id)
-            async with async_session() as session:
-                material = await session.get(Material, material_id)
-                if material:
-                    material.status = "failed"
-                    material.error_message = str(e)[:500]
-                job = await session.get(MaterialParseJob, job_id)
-                if job:
-                    job.status = "failed"
-                    job.error_message = str(e)[:500]
-                    job.progress_message = f"失败：{str(e)[:100]}"
-                    job.finished_at = _utcnow()
-                await session.commit()
 
 
 # 模块级单例

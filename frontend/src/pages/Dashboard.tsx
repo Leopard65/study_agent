@@ -158,7 +158,7 @@ export default function Dashboard() {
   const cards = [
     { label: '今日任务', value: `${stats.today_completed}/${stats.today_tasks}`, color: 'bg-blue-500', to: '/plan' as const },
     { label: '连续打卡', value: `${stats.streak_days} 天`, color: 'bg-green-500', to: null },
-    { label: '今日复习', value: `${reviewCount} 题`, color: 'bg-orange-500', to: '/errors?filter=review' as const },
+    { label: '今日复习', value: `${reviewCount} 题`, color: 'bg-orange-500', to: '/review' as const },
     { label: '今日学习', value: `${stats.today_study_minutes} 分钟`, color: 'bg-indigo-500', to: null },
     { label: '未掌握错题', value: stats.unmastered_errors, color: 'bg-red-500', to: '/errors' as const },
   ];
@@ -246,7 +246,7 @@ export default function Dashboard() {
               : '今天暂无需要复习的错题'}
           </span>
           {reviewCount > 0 && (
-            <Link to="/errors?filter=review" className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
+            <Link to="/review" className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
               去复习 →
             </Link>
           )}

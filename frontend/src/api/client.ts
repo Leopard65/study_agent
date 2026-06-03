@@ -451,6 +451,55 @@ export const globalSearch = (q: string, types?: string, limit?: number, offset?:
   return api.get<SearchResponse>('/search', { params }).then(r => r.data);
 };
 
+// ── Review Queue ──
+export interface ReviewQueueItem {
+  id: number;
+  subject: string;
+  chapter: string;
+  knowledge_point: string;
+  question: string;
+  user_answer: string;
+  correct_answer: string;
+  error_type: string;
+  error_reason: string;
+  correct_approach: string;
+  review_suggestion: string;
+  tags: string;
+  next_review_date: string;
+  mastered: boolean;
+  review_count: number;
+  due_days: number;
+  priority_reason: string;
+}
+
+export interface WeakPoint {
+  name: string;
+  count: number;
+}
+
+export interface ReviewQueueResponse {
+  items: ReviewQueueItem[];
+  total_due: number;
+  total_unmastered: number;
+  weak_points: WeakPoint[];
+  today: string;
+}
+
+export interface ReviewActionResult {
+  ok: boolean;
+  action: string;
+  error_id: number;
+  mastered?: boolean;
+  next_review_date?: string;
+  review_count?: number;
+}
+
+export const getReviewQueue = (): Promise<ReviewQueueResponse> =>
+  api.get<ReviewQueueResponse>('/review/queue').then(r => r.data);
+
+export const submitReviewAction = (errorId: number, action: string): Promise<ReviewActionResult> =>
+  api.post<ReviewActionResult>(`/review/${errorId}/action`, { action }).then(r => r.data);
+
 // ── Health ──
 export const getHealth = (): Promise<HealthStatus> =>
   api.get<HealthStatus>('/health').then(r => r.data);

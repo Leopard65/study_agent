@@ -4,8 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.database import init_db, async_session
-from app.config import get_settings
-from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, import_data, search, sessions
+from app.config import get_settings, is_ai_configured
+from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, import_data, search, sessions, review
 
 
 @asynccontextmanager
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     await stop_worker()
 
 
-app = FastAPI(title="考研学习助手", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="考研学习助手", version="0.4.0", lifespan=lifespan)
 
 settings = get_settings()
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
@@ -43,6 +43,7 @@ app.include_router(settings_router.router)
 app.include_router(import_data.router)
 app.include_router(search.router)
 app.include_router(sessions.router)
+app.include_router(review.router)
 
 
 @app.get("/api/health")
@@ -90,7 +91,7 @@ async def health():
         "status": overall,
         "database": db_status,
         "upload_dir": upload_status,
-        "ai_configured": bool(settings.openai_api_key.strip()),
+        "ai_configured": is_ai_configured(),
         "model": settings.openai_model,
         "ocr_available": ocr_available,
     }

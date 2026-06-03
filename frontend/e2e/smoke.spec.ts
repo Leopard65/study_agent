@@ -9,6 +9,7 @@ const pages = [
   { path: '/errors', heading: '错题本' },
   { path: '/plan', heading: '学习计划' },
   { path: '/exam', heading: '真题练习' },
+  { path: '/review', heading: '今日复习' },
   { path: '/search', heading: '全局搜索' },
 ];
 
@@ -407,5 +408,94 @@ test.describe('search network behavior', () => {
 
     await expect(page.getByText('fast-result')).toBeVisible();
     await expect(page.getByText('slow-result')).toHaveCount(0);
+  });
+
+});
+
+test.describe('review queue', () => {
+  test('seed errors, expand answer, mark mastered, completion', async ({ page }) => {
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+
+    // Use local date (YYYY-MM-DD in Asia/Shanghai) matching the backend
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+    const future = new Date(Date.now() + 30 * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+
+    const err1Res = await page.request.post(`${apiBase}/errors`, {
+      data: {
+        subject: '高数', knowledge_point: '极限', error_type: '计算错误',
+        question: 'E2E 复习测试题 1：求极限 $\\lim_{x\\to 0} \\frac{\\sin x}{x}$',
+        correct_answer: '1', correct_approach: '等价无穷小替换',
+        review_suggestion: '多做极限计算练习',
+        next_review_date: today,
+      },
+    });
+    expect(err1Res.ok()).toBeTruthy();
+    const err1 = await err1Res.json();
+
+    const err2Res = await page.request.post(`${apiBase}/errors`, {
+      data: {
+        subject: '线代', knowledge_point: '矩阵',
+        question: 'E2E 复习测试题 2：矩阵乘法不满足交换律',
+        next_review_date: today,
+      },
+    });
+    expect(err2Res.ok()).toBeTruthy();
+    const err2 = await err2Res.json();
+
+    // Future error should not appear
+    const err3Res = await page.request.post(`${apiBase}/errors`, {
+      data: { subject: '概率', question: 'E2E 未来错题', next_review_date: future },
+    });
+    expect(err3Res.ok()).toBeTruthy();
+    const err3 = await err3Res.json();
+
+    try {
+      // Navigate to review queue
+      await page.goto('/review');
+      await expect(page.getByRole('heading', { name: '今日复习' })).toBeVisible();
+
+      // Wait for queue to load — progress shows "N / N"
+      await expect(page.getByText(/\/ \d/)).toBeVisible({ timeout: 10000 });
+
+      // First question should be visible
+      await expect(page.getByText(/E2E 复习测试题/)).toBeVisible();
+
+      // Verify badges
+      await expect(page.getByText('高数').or(page.getByText('线代'))).toBeVisible();
+
+      // Click "显示解析与答案"
+      await page.getByRole('button', { name: /显示解析与答案/ }).click();
+
+      // Answer section should appear
+      await expect(page.getByText(/正确答案|正确思路|复习建议/).first()).toBeVisible();
+
+      // Click "标记掌握"
+      await page.getByRole('button', { name: /标记掌握/ }).click();
+
+      // After mastering one, should advance to next (or complete if last)
+      // The progress should update
+      await page.waitForTimeout(500);
+
+      // Click "显示解析与答案" for the second question (if visible)
+      const showBtn = page.getByRole('button', { name: /显示解析与答案/ });
+      if (await showBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await showBtn.click();
+        // Mark mastered again
+        await page.getByRole('button', { name: /标记掌握/ }).click();
+        await page.waitForTimeout(500);
+      }
+
+      // Should reach completion state
+      await expect(page.getByText(/本轮复习完成|今日无待复习错题/)).toBeVisible({ timeout: 5000 });
+
+      // Completion page should have navigation links
+      await expect(page.getByRole('link', { name: /返回工作台/ })).toBeVisible();
+      await expect(page.getByRole('link', { name: /查看错题本/ })).toBeVisible();
+    } finally {
+      // Cleanup
+      await page.request.delete(`${apiBase}/errors/${err1.id}`);
+      await page.request.delete(`${apiBase}/errors/${err2.id}`);
+      await page.request.delete(`${apiBase}/errors/${err3.id}`);
+    }
   });
 });
