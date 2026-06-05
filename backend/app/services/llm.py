@@ -1,7 +1,8 @@
 from openai import AsyncOpenAI
-from app.config import get_settings
+from app.config import get_settings, is_ai_configured
 
 _client: AsyncOpenAI | None = None
+_client_config: tuple[str, str] | None = None  # (api_key, base_url) 缓存快照
 
 
 class LLMConfigError(Exception):
@@ -12,27 +13,46 @@ class LLMCallError(Exception):
     """调用 LLM 接口失败。"""
 
 
+_CONFIG_ERROR_MSG = (
+    "未配置有效的 OPENAI_API_KEY，请在 backend/.env 中填写真实的 API Key；"
+    "留空或使用占位符（如 your_api_key_here、sk-xxx）时 AI 功能不可用"
+)
+
+
+def _check_ai_configured() -> None:
+    """统一使用 is_ai_configured() 检查，不通过则抛出 LLMConfigError。"""
+    if not is_ai_configured():
+        raise LLMConfigError(_CONFIG_ERROR_MSG)
+
+
 def get_client() -> AsyncOpenAI:
-    global _client
+    """获取 AsyncOpenAI 单例。当 API Key 或 base_url 变化时自动重建。"""
+    global _client, _client_config
     settings = get_settings()
-    if _client is None:
-        if not settings.openai_api_key.strip():
-            raise LLMConfigError("未配置 OPENAI_API_KEY，请在 backend/.env 中填写 API Key")
-        _client = AsyncOpenAI(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
-        )
+    _check_ai_configured()
+    current = (settings.openai_api_key, settings.openai_base_url)
+    if _client is not None and _client_config == current:
+        return _client
+    # 配置变化或首次创建 → 重建 client
+    _client = AsyncOpenAI(
+        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key,
+    )
+    _client_config = current
     return _client
 
 
 def _require_api_key() -> str:
     """返回 model 名称，若 API Key 未配置则抛出 LLMConfigError。"""
-    settings = get_settings()
-    if not settings.openai_api_key.strip():
-        raise LLMConfigError(
-            "未配置 OPENAI_API_KEY，请在 backend/.env 中填写 API Key"
-        )
-    return settings.openai_model
+    _check_ai_configured()
+    return get_settings().openai_model
+
+
+def reset_client() -> None:
+    """重置缓存的 AsyncOpenAI client（用于测试或配置热更新后）。"""
+    global _client, _client_config
+    _client = None
+    _client_config = None
 
 
 SYSTEM_PROMPT = (

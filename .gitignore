@@ -22,6 +22,11 @@ backend/tessdata/*.traineddata
 backend/*.log
 backend/*-dev*.log
 
+# Windows startup runtime artifacts
+scripts/*.log
+scripts/.running_pids
+scripts/_start_*.bat
+
 # Claude local config
 .claude/
 

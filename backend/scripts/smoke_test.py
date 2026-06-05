@@ -2663,6 +2663,106 @@ def run(client: TestClient):
     r = client.get("/api/export/json")
     check("export version=0.2", r.json().get("version") == "0.2", f"got {r.json().get('version')}")
 
+    # ── 30. Placeholder API Key → AI endpoints return 503 ──
+    print("\n[30] Placeholder API Key → AI endpoints return 503")
+    from app.config import get_settings as _gs
+    from app.services.llm import reset_client, _require_api_key, get_client, LLMConfigError
+
+    _orig_key = os.environ.get("OPENAI_API_KEY", "")
+    try:
+        os.environ["OPENAI_API_KEY"] = "your_api_key_here"
+        _gs.cache_clear()
+        reset_client()
+
+        # Health should report ai_configured=false
+        r = client.get("/api/health")
+        check("placeholder: health 200", r.status_code == 200)
+        check("placeholder: ai_configured=false", r.json()["ai_configured"] is False,
+              f"got {r.json()['ai_configured']}")
+
+        # _require_api_key should raise LLMConfigError
+        _raised = False
+        try:
+            _require_api_key()
+        except LLMConfigError:
+            _raised = True
+        except Exception:
+            pass
+        check("placeholder: _require_api_key raises LLMConfigError", _raised)
+
+        # AI endpoints should return 503 with helpful message
+        ai_endpoints = [
+            ("POST", "/api/chat", {"question": "test"}),
+            ("POST", "/api/problems/solve", {"question": "1+1"}),
+            ("POST", "/api/plan/generate", {"subjects": ["数学"], "daily_hours": 2, "days": 3}),
+            ("POST", "/api/exam/generate", {"subject": "数学", "topic": "极限", "count": 1}),
+        ]
+        for method, path, payload in ai_endpoints:
+            r = client.post(path, json=payload)
+            check(f"placeholder: {path} → 503", r.status_code == 503,
+                  f"got {r.status_code}")
+            detail = r.json().get("detail", "")
+            check(f"placeholder: {path} detail mentions API Key",
+                  "API_KEY" in detail.upper() or "api key" in detail.lower() or "OPENAI_API_KEY" in detail,
+                  f"detail={detail[:80]}")
+    finally:
+        os.environ["OPENAI_API_KEY"] = _orig_key
+        _gs.cache_clear()
+        reset_client()
+
+    # ── 31. _require_api_key and client cache rebuild ──
+    print("\n[31] _require_api_key and client cache rebuild")
+    import app.services.llm as _llm_mod
+
+    # With a non-placeholder key, _require_api_key should return model name
+    _orig_key = os.environ.get("OPENAI_API_KEY", "")
+    _orig_url = os.environ.get("OPENAI_BASE_URL", "")
+    try:
+        os.environ["OPENAI_API_KEY"] = "sk-test-real-key-12345"
+        os.environ["OPENAI_BASE_URL"] = "https://api.example.com"
+        _gs.cache_clear()
+        reset_client()
+
+        # _require_api_key should return model name without error
+        try:
+            model = _require_api_key()
+            check("real key: _require_api_key returns model", isinstance(model, str) and len(model) > 0,
+                  f"got {model}")
+        except LLMConfigError:
+            check("real key: _require_api_key returns model", False, "raised LLMConfigError")
+
+        # get_client should create a client
+        c1 = get_client()
+        check("real key: get_client succeeds", c1 is not None)
+        check("real key: client config recorded", _llm_mod._client_config is not None)
+
+        # Same config → same client instance
+        c2 = get_client()
+        check("same config: client reused", c1 is c2)
+
+        # Change base_url → client should be rebuilt
+        os.environ["OPENAI_BASE_URL"] = "https://api.other.com"
+        _gs.cache_clear()
+        # Don't call reset_client — rely on config-change detection
+        c3 = get_client()
+        check("changed url: client rebuilt", c3 is not c1, "should be a new instance")
+
+        # Change key → client should be rebuilt
+        os.environ["OPENAI_API_KEY"] = "sk-another-key-67890"
+        _gs.cache_clear()
+        c4 = get_client()
+        check("changed key: client rebuilt", c4 is not c3, "should be a new instance")
+
+        # Health should report ai_configured=true with a non-placeholder key
+        r = client.get("/api/health")
+        check("real key: health ai_configured=true", r.json()["ai_configured"] is True,
+              f"got {r.json()['ai_configured']}")
+    finally:
+        os.environ["OPENAI_API_KEY"] = _orig_key
+        os.environ["OPENAI_BASE_URL"] = _orig_url
+        _gs.cache_clear()
+        reset_client()
+
 
 # ── Main ──
 with TestClient(app) as client:

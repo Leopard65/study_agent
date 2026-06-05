@@ -48,9 +48,19 @@
 powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1
 ```
 
-脚本会自动：检查 Python/Node 版本 → 创建虚拟环境 → 安装依赖 → 创建 `.env` → 启动后端和前端 → 打开浏览器。
+脚本会自动：检查 Python/Node 版本 → 创建虚拟环境 → 安装依赖 → 检查 `.env` → 启动后端和前端 → 打开浏览器。
 
-如需 AI 功能，启动后编辑 `backend\.env` 填入 `OPENAI_API_KEY`。
+**最简流程（无需 AI）**：直接运行脚本，错题本、复习队列、资料管理等核心功能即可使用。
+
+**启用 AI 功能**：
+1. 编辑 `backend\.env`，填入 `OPENAI_API_KEY=你的真实Key`
+2. 重新运行启动脚本（API Key 在启动时读取，运行中修改不会生效）
+
+**停止服务**：在启动窗口按任意键自动停止所有服务（含子进程），或另开终端运行 `scripts\stop-windows.ps1`。
+
+> 出错时可查看日志：`scripts\backend.log`（后端 stdout+stderr）、`scripts\frontend.log`（前端）。
+>
+> 启动脚本支持参数：`-NoOpenBrowser`（不打开浏览器）、`-AutoStopAfterSeconds N`（N 秒后自动停止，用于测试）。
 
 ### 方式二：手动启动（所有平台）
 
@@ -82,6 +92,8 @@ cd ../backend
 ```
 
 编辑 `backend/.env`，如需 AI 功能填入 `OPENAI_API_KEY`。支持任何 OpenAI-compatible API：
+
+> **注意**：API Key 在后端启动时读取，修改 `.env` 后需要重启后端才能生效。
 
 | 服务商 | OPENAI_BASE_URL | 说明 |
 |---|---|---|
@@ -161,7 +173,7 @@ TESSDATA_DIR=./tessdata
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `OPENAI_BASE_URL` | `https://api.deepseek.com` | API 地址 |
-| `OPENAI_API_KEY` | — | API Key（**唯一必填项**） |
+| `OPENAI_API_KEY` | — | API Key（AI 功能必填；留空可使用核心本地功能） |
 | `OPENAI_MODEL` | `deepseek-v4-flash` | 模型名称 |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 前端访问地址 |
 | `APP_TIMEZONE` | `Asia/Shanghai` | 时区 |
@@ -320,7 +332,20 @@ npx playwright install chromium
 npm run e2e
 ```
 
-截至当前版本，后端冒烟测试 **717 passed, 0 failed**，前端 E2E 测试 **14 passed**。
+**Windows 启动脚本验证**（需要后端依赖已安装）：
+
+```powershell
+# 自动启动 → 验证 → 停止，不打开浏览器
+powershell -ExecutionPolicy Bypass -File scripts\test-windows-start.ps1
+
+# 手动测试启动脚本参数
+powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 -NoOpenBrowser -AutoStopAfterSeconds 3
+
+# 测试停止脚本
+powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
+```
+
+截至当前版本，后端冒烟测试 **757 passed, 0 failed**，前端 E2E 测试 **14 passed**。
 
 ## License
 
