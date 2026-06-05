@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.database import init_db, async_session
 from app.config import get_settings, is_ai_configured
-from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, import_data, search, sessions, review
+from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, import_data, search, sessions, review, maintenance
 
 
 @asynccontextmanager
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     await stop_worker()
 
 
-app = FastAPI(title="考研学习助手", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="考研学习助手", version="0.6.0", lifespan=lifespan)
 
 settings = get_settings()
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
@@ -44,6 +44,7 @@ app.include_router(import_data.router)
 app.include_router(search.router)
 app.include_router(sessions.router)
 app.include_router(review.router)
+app.include_router(maintenance.router)
 
 
 @app.get("/api/health")

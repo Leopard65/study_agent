@@ -84,6 +84,8 @@ async def global_search(
             )
             filenames = {row.id: row.filename for row in mat_rows}
             for mid, c in best_chunks.items():
+                if mid not in filenames:
+                    continue  # skip FTS hits for deleted materials
                 results.append({
                     "type": "material",
                     "id": mid,

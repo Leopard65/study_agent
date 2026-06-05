@@ -16,6 +16,7 @@ const StudyPlan = lazy(() => import('./pages/StudyPlan'));
 const ExamPractice = lazy(() => import('./pages/ExamPractice'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
 const ReviewQueue = lazy(() => import('./pages/ReviewQueue'));
+const Maintenance = lazy(() => import('./pages/Maintenance'));
 
 function PageFallback() {
   return (
@@ -83,6 +84,7 @@ function AppInner() {
           <Route path="/exam" element={<ExamPractice />} />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/review" element={<ReviewQueue />} />
+          <Route path="/maintenance" element={<Maintenance />} />
         </Routes>
         </Suspense>
       </main>

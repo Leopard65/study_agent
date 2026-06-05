@@ -359,6 +359,9 @@ export const deleteExamQuestion = (id: number): Promise<OkResponse> =>
 export const exportJson = (): Promise<Blob> =>
   api.get('/export/json', { responseType: 'blob' }).then(r => r.data);
 
+export const exportZip = (): Promise<Blob> =>
+  api.get('/export/zip', { responseType: 'blob' }).then(r => r.data);
+
 // ── Import ──
 export interface ImportModuleStats {
   total: number;
@@ -377,6 +380,7 @@ export interface ImportPreview {
   total_conflicts: number;
   modules: Record<string, ImportModuleStats>;
   conflict_samples: Record<string, string[]>;
+  settings_invalid?: number;
   // Backward compat flat fields
   materials_count: number;
   error_book_count: number;
@@ -385,6 +389,8 @@ export interface ImportPreview {
   chat_history_count: number;
   exam_questions_count: number;
   exam_attempts_count: number;
+  app_settings_count?: number;
+  study_sessions_count?: number;
 }
 
 export interface ImportResult {
@@ -392,6 +398,11 @@ export interface ImportResult {
   skipped: Record<string, number>;
   overwritten: Record<string, number>;
   kept_both: Record<string, number>;
+  settings_imported?: number;
+  settings_skipped?: number;
+  settings_warnings?: string[];
+  sessions_imported?: number;
+  sessions_skipped?: number;
 }
 
 export const importPreview = (data: Record<string, unknown>, strategy = 'skip'): Promise<ImportPreview> =>
@@ -399,6 +410,35 @@ export const importPreview = (data: Record<string, unknown>, strategy = 'skip'):
 
 export const importJson = (data: Record<string, unknown>, strategy = 'skip'): Promise<ImportResult> =>
   api.post<ImportResult>('/import/json', data, { params: { strategy } }).then(r => r.data);
+
+// ── ZIP Import ──
+export interface ZipInfo {
+  file_count: number;
+  materials_with_files: number;
+  materials_without_files: number;
+  total_file_size: number;
+  manifest_present: boolean;
+}
+
+export interface ZipImportPreview extends ImportPreview {
+  zip_info: ZipInfo;
+}
+
+export interface ZipImportResult extends ImportResult {
+  files_restored: number;
+}
+
+export const importZipPreview = (file: File, strategy = 'skip'): Promise<ZipImportPreview> => {
+  const fd = new FormData();
+  fd.append('file', file);
+  return api.post<ZipImportPreview>('/import/zip/preview', fd, { params: { strategy } }).then(r => r.data);
+};
+
+export const importZip = (file: File, strategy = 'skip'): Promise<ZipImportResult> => {
+  const fd = new FormData();
+  fd.append('file', file);
+  return api.post<ZipImportResult>('/import/zip', fd, { params: { strategy } }).then(r => r.data);
+};
 
 // ── Settings ──
 export const getReviewSettings = (): Promise<{ intervals: number[] }> =>
@@ -503,6 +543,62 @@ export const submitReviewAction = (errorId: number, action: string): Promise<Rev
 // ── Health ──
 export const getHealth = (): Promise<HealthStatus> =>
   api.get<HealthStatus>('/health').then(r => r.data);
+
+// ── Maintenance ──
+export interface MaintenanceHealth {
+  total_materials: number;
+  total_chunks: number;
+  upload_files: number;
+  orphan_files: number;
+  orphan_file_names: string[];
+  missing_files: number;
+  missing_file_names: string[];
+  failed_materials: number;
+  failed_jobs: number;
+  processing_jobs: number;
+  database_size: number;
+  uploads_size: number;
+  total_operations: number;
+}
+
+export interface CleanupPreview {
+  orphan_files: string[];
+  orphan_files_count: number;
+  invalid_jobs: { job_id: number; material_id: number; status: string }[];
+  invalid_jobs_count: number;
+  orphan_chunk_materials: number[];
+  orphan_chunk_materials_count: number;
+}
+
+export interface CleanupResult {
+  deleted_files: string[];
+  skipped_files: string[];
+  deleted_jobs: number;
+  deleted_chunks: number;
+  errors: string[];
+}
+
+export interface OperationLogItem {
+  id: number;
+  operation_type: string;
+  file_type: string;
+  strategy: string;
+  result_summary: string;
+  error_message: string;
+  created_at: string | null;
+}
+
+export const getMaintenanceHealth = (): Promise<MaintenanceHealth> =>
+  api.get<MaintenanceHealth>('/maintenance/health').then(r => r.data);
+
+export const getCleanupPreview = (): Promise<CleanupPreview> =>
+  api.post<CleanupPreview>('/maintenance/cleanup/preview').then(r => r.data);
+
+export const executeCleanup = (): Promise<CleanupResult> =>
+  api.post<CleanupResult>('/maintenance/cleanup').then(r => r.data);
+
+export const getOperationLogs = (limit = 20): Promise<OperationLogItem[]> =>
+  api.get<OperationLogItem[]>('/maintenance/logs', { params: { limit } }).then(r => r.data);
 
 export default api;
 

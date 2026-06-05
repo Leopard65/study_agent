@@ -1,12 +1,21 @@
+import json
+import os
 import re
-from fastapi import APIRouter, Depends, HTTPException, Query
+import zipfile
+import io
+from datetime import datetime as _dt_mod, timezone as _tz
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
+from app.config import get_settings
 from app.models import (
     Material, ErrorBook, StudyPlan, ProblemRecord,
-    ChatHistory, ExamQuestion, ExamAttempt,
+    ChatHistory, ExamQuestion, ExamAttempt, MaterialParseJob, OperationLog,
+    AppSetting, StudySession,
 )
+from app.routers.settings import validate_review_intervals, SETTING_KEY
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 
@@ -15,6 +24,9 @@ REQUIRED_KEYS = {"exported_at", "version", "materials", "error_book",
                  "chat_history", "material_chunks_count"}
 
 VALID_STRATEGIES = {"skip", "overwrite", "keep_both"}
+
+# Whitelist of app_settings keys that can be imported
+_SETTINGS_WHITELIST = {"review_intervals"}
 
 
 def _validate(data: dict):
@@ -68,6 +80,147 @@ async def _next_copy_title(db: AsyncSession, base: str) -> str:
             return candidate
         candidate = _make_copy_name(candidate)
     return candidate
+
+
+def _normalize_utc(dt: _dt_mod) -> _dt_mod:
+    """Normalize a datetime to UTC-aware. Naive datetimes are assumed UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_tz.utc)
+    return dt.astimezone(_tz.utc)
+
+
+def _parse_backup_datetime(raw) -> _dt_mod | None:
+    """Parse a backup datetime string/object to a UTC-aware datetime.
+    Returns None if parsing fails."""
+    if raw is None:
+        return None
+    if isinstance(raw, _dt_mod):
+        return _normalize_utc(raw)
+    if isinstance(raw, str):
+        try:
+            return _normalize_utc(_dt_mod.fromisoformat(raw))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _validate_setting_value(key: str, value: str) -> str | None:
+    """Validate a setting value. Returns error message or None if valid."""
+    if key == SETTING_KEY:
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return "review_intervals 值不是合法 JSON"
+        err = validate_review_intervals(parsed)
+        return err
+    return None
+
+
+async def _import_app_settings(db: AsyncSession, data: dict, strategy: str) -> tuple[int, int, list[str]]:
+    """Import app_settings from backup. Returns (imported, skipped, warnings)."""
+    imported = 0
+    skipped = 0
+    warnings: list[str] = []
+    for s in data.get("app_settings", []):
+        key = s.get("key", "")
+        value = s.get("value", "")
+        if not key:
+            continue
+        # Whitelist check
+        if key not in _SETTINGS_WHITELIST:
+            skipped += 1
+            continue
+        # Validate value
+        err = _validate_setting_value(key, value)
+        if err:
+            warnings.append(f"{key}: {err}")
+            skipped += 1
+            continue
+        existing = await db.get(AppSetting, key)
+        if existing:
+            if strategy == "overwrite":
+                existing.value = value
+                imported += 1
+            else:
+                skipped += 1
+        else:
+            db.add(AppSetting(key=key, value=value))
+            imported += 1
+    return imported, skipped, warnings
+
+
+async def _import_study_sessions(db: AsyncSession, data: dict, strategy: str) -> tuple[int, int, int]:
+    """Import study_sessions from backup. Returns (imported, skipped, kept_both_count).
+
+    Duplicate detection: same started_at + subject + note.
+    Active sessions (no ended_at) are force-ended at import time.
+    All datetimes are normalized to UTC-aware for consistent comparison.
+    """
+    imported = 0
+    skipped = 0
+    kept_both_count = 0
+    now_utc = _normalize_utc(_dt_mod.now(_tz.utc))
+    for s in data.get("study_sessions", []):
+        started_dt = _parse_backup_datetime(s.get("started_at"))
+        if started_dt is None:
+            skipped += 1
+            continue
+        ended_dt = _parse_backup_datetime(s.get("ended_at"))
+
+        # Active session (no ended_at) → force-end at import time
+        if ended_dt is None:
+            ended_dt = now_utc
+            # Recalculate duration if original was 0
+            duration = s.get("duration_minutes", 0) or 0
+            if duration == 0:
+                delta = ended_dt - started_dt
+                duration = max(0, int(delta.total_seconds() // 60))
+        else:
+            duration = s.get("duration_minutes", 0) or 0
+
+        subject = s.get("subject", "")
+        note = s.get("note", "")
+
+        # Duplicate detection: match on started_at + subject + note
+        dup = await db.execute(
+            select(StudySession.id).where(
+                StudySession.started_at == started_dt,
+                StudySession.subject == subject,
+                StudySession.note == note,
+            ).limit(1)
+        )
+        existing_id = dup.scalars().first()
+
+        if existing_id is not None:
+            if strategy == "skip":
+                skipped += 1
+            elif strategy == "overwrite":
+                existing_rec = await db.get(StudySession, existing_id)
+                if existing_rec:
+                    existing_rec.ended_at = ended_dt
+                    existing_rec.duration_minutes = duration
+                    existing_rec.note = note
+                    imported += 1
+                else:
+                    skipped += 1
+            else:  # keep_both
+                rec = StudySession(
+                    subject=subject, note=note,
+                    started_at=started_dt, ended_at=ended_dt,
+                    duration_minutes=duration,
+                )
+                db.add(rec)
+                kept_both_count += 1
+        else:
+            rec = StudySession(
+                subject=subject, note=note,
+                started_at=started_dt, ended_at=ended_dt,
+                duration_minutes=duration,
+            )
+            db.add(rec)
+            imported += 1
+
+    return imported, skipped, kept_both_count
 
 
 @router.post("/preview")
@@ -205,6 +358,73 @@ async def import_preview(
 
     total_conflicts = sum(s["conflict_count"] for s in stats.values())
 
+    # ── App settings preview (review intervals) ──
+    settings_total = 0
+    settings_new = 0
+    settings_conflict = 0
+    settings_invalid = 0
+    for s in data.get("app_settings", []):
+        key = s.get("key", "")
+        value = s.get("value", "")
+        if not key or key not in _SETTINGS_WHITELIST:
+            continue
+        err = _validate_setting_value(key, value)
+        if err:
+            settings_invalid += 1
+            continue
+        settings_total += 1
+        existing = await db.get(AppSetting, key)
+        if existing:
+            settings_conflict += 1
+        else:
+            settings_new += 1
+
+    stats["app_settings"] = {
+        "total": settings_total, "new_count": settings_new, "conflict_count": settings_conflict,
+        "would_insert": settings_new if strategy in ("skip", "keep_both") else settings_new,
+        "would_skip": settings_conflict if strategy in ("skip", "keep_both") else 0,
+        "would_overwrite": settings_conflict if strategy == "overwrite" else 0,
+        "would_keep_both": 0,  # settings are singleton, no keep_both
+    }
+    total_conflicts += settings_conflict
+
+    # ── Study sessions preview (duplicate detection) ──
+    sess_total = 0
+    sess_new = 0
+    sess_conflict = 0
+    for s in data.get("study_sessions", []):
+        started_dt = _parse_backup_datetime(s.get("started_at"))
+        if started_dt is None:
+            continue
+        sess_total += 1
+        subject = s.get("subject", "")
+        note = s.get("note", "")
+        dup = await db.execute(
+            select(StudySession.id).where(
+                StudySession.started_at == started_dt,
+                StudySession.subject == subject,
+                StudySession.note == note,
+            ).limit(1)
+        )
+        if dup.scalars().first() is not None:
+            sess_conflict += 1
+        else:
+            sess_new += 1
+
+    if strategy == "skip":
+        sess_skip, sess_ow, sess_kb = sess_conflict, 0, 0
+    elif strategy == "overwrite":
+        sess_skip, sess_ow, sess_kb = 0, sess_conflict, 0
+    else:
+        sess_skip, sess_ow, sess_kb = 0, 0, sess_conflict
+
+    stats["study_sessions"] = {
+        "total": sess_total, "new_count": sess_new, "conflict_count": sess_conflict,
+        "would_insert": sess_new, "would_skip": sess_skip,
+        "would_overwrite": sess_ow, "would_keep_both": sess_kb,
+    }
+    total_conflicts += sess_conflict
+
     return {
         "version": data.get("version"),
         "exported_at": data.get("exported_at"),
@@ -212,6 +432,7 @@ async def import_preview(
         "total_conflicts": total_conflicts,
         "modules": stats,
         "conflict_samples": conflict_samples,
+        "settings_invalid": settings_invalid,
         # Backward compat: keep old flat fields
         "materials_count": stats["materials"]["total"],
         "error_book_count": stats["error_book"]["total"],
@@ -220,6 +441,8 @@ async def import_preview(
         "chat_history_count": stats["chat_history"]["total"],
         "exam_questions_count": stats["exam_questions"]["total"],
         "exam_attempts_count": stats["exam_attempts"]["total"],
+        "app_settings_count": settings_total,
+        "study_sessions_count": sess_total,
     }
 
 
@@ -249,8 +472,7 @@ async def import_json(
             if strategy == "skip":
                 skipped["materials"] += 1
             elif strategy == "overwrite":
-                existing.content = ""
-                existing.stored_filename = ""
+                # JSON backup has no file content — preserve existing content and file
                 overwritten["materials"] += 1
             else:  # keep_both
                 rec = Material(filename=_make_copy_name(fn, max_len=500), file_type=ft, content="", stored_filename="")
@@ -455,10 +677,559 @@ async def import_json(
         db.add(rec)
         inserted["exam_attempts"] += 1
 
+    # ── App settings (review intervals, etc.) — v0.3+ optional ──
+    settings_imported, settings_skipped, settings_warnings = await _import_app_settings(db, data, strategy)
+
+    # ── Study sessions — v0.3+ optional, idempotent ──
+    sessions_imported, sessions_skipped, sessions_kept_both = await _import_study_sessions(db, data, strategy)
+    # Merge sessions_kept_both into kept_both counter
+    kept_both["study_sessions"] = sessions_kept_both
+
     await db.commit()
-    return {
+
+    result = {
         "inserted": inserted,
         "skipped": skipped,
         "overwritten": overwritten,
         "kept_both": kept_both,
+        "settings_imported": settings_imported,
+        "settings_skipped": settings_skipped,
+        "sessions_imported": sessions_imported,
+        "sessions_skipped": sessions_skipped,
     }
+    if settings_warnings:
+        result["settings_warnings"] = settings_warnings
+
+    # Log the operation
+    log_summary = {k: {m: v for m, v in counts.items() if v > 0} for k, counts in result.items() if isinstance(counts, dict)}
+    log_summary["settings_imported"] = settings_imported
+    log_summary["sessions_imported"] = sessions_imported
+    log = OperationLog(operation_type="import_json", file_type="json", strategy=strategy,
+                       result_summary=json.dumps(log_summary, ensure_ascii=False))
+    db.add(log)
+    await db.commit()
+
+    return result
+
+
+# ── ZIP import helpers ──
+
+def _safe_zip_path(entry_name: str, upload_dir: str) -> str | None:
+    """Validate a ZIP entry name and return the resolved absolute path
+    under upload_dir. Returns None if the path is unsafe."""
+    # Reject absolute paths, backslashes, and leading slash
+    if os.path.isabs(entry_name) or "\\" in entry_name or entry_name.startswith("/"):
+        return None
+    # Reject any path component that is ".."
+    parts = entry_name.split("/")
+    if any(p == ".." or p == "" for p in parts):
+        return None
+    # Only allow uploads/<filename> with safe filename
+    if len(parts) != 2 or parts[0] != "uploads":
+        return None
+    fname = parts[1]
+    # Reject filenames with special characters or path separators
+    if not fname or "/" in fname or "\\" in fname or ".." in fname:
+        return None
+    # Must have an allowed extension
+    ext = os.path.splitext(fname)[1].lower()
+    _ALLOWED_EXTS = {".pdf", ".docx", ".doc", ".txt", ".md", ".markdown"}
+    if ext not in _ALLOWED_EXTS:
+        return None
+    resolved = os.path.normpath(os.path.join(upload_dir, fname))
+    if not resolved.startswith(os.path.normpath(upload_dir) + os.sep) and resolved != os.path.normpath(upload_dir):
+        return None
+    return resolved
+
+
+@router.post("/zip/preview")
+async def import_zip_preview(
+    file: UploadFile = File(...),
+    strategy: str = Query(default="skip", description="冲突策略: skip / overwrite / keep_both"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview a ZIP backup: validate structure and return conflict analysis."""
+    if strategy not in VALID_STRATEGIES:
+        raise HTTPException(422, f"无效的冲突策略 '{strategy}'，支持: skip, overwrite, keep_both")
+
+    content = await file.read()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        raise HTTPException(422, "无效的 ZIP 文件")
+
+    names = set(zf.namelist())
+    if "backup.json" not in names:
+        raise HTTPException(422, "ZIP 缺少 backup.json")
+
+    # Read and validate backup.json
+    try:
+        data = json.loads(zf.read("backup.json"))
+    except Exception:
+        raise HTTPException(422, "backup.json 格式错误")
+    _validate(data)
+
+    # Build manifest of files in ZIP
+    settings = get_settings()
+    upload_dir = os.path.abspath(settings.upload_dir)
+    zip_files: dict[str, int] = {}  # stored_filename -> size
+    for entry in zf.infolist():
+        if entry.is_dir():
+            continue
+        safe = _safe_zip_path(entry.filename, upload_dir)
+        if safe:
+            stored = os.path.basename(safe)
+            zip_files[stored] = entry.file_size
+
+    # Cross-reference with materials in backup
+    materials_in_backup = data.get("materials", [])
+    materials_with_files = [m for m in materials_in_backup if m.get("stored_filename") in zip_files]
+    materials_without_files = [m for m in materials_in_backup if m.get("stored_filename") not in zip_files]
+
+    # Conflict analysis for materials
+    mat_total = 0
+    mat_new = 0
+    mat_conflict = 0
+    mat_samples: list[str] = []
+    for m in materials_in_backup:
+        fn = m.get("filename", "")
+        ft = m.get("file_type", "")
+        if not fn:
+            continue
+        mat_total += 1
+        existing = await _exists(db, Material, Material.filename == fn, Material.file_type == ft)
+        if existing:
+            mat_conflict += 1
+            if len(mat_samples) < 3:
+                mat_samples.append(fn[:50])
+        else:
+            mat_new += 1
+
+    if strategy == "skip":
+        mat_skip, mat_ow, mat_kb = mat_conflict, 0, 0
+    elif strategy == "overwrite":
+        mat_skip, mat_ow, mat_kb = 0, mat_conflict, 0
+    else:
+        mat_skip, mat_ow, mat_kb = 0, 0, mat_conflict
+
+    # Reuse existing preview logic for other modules
+    preview = await import_preview(data, strategy, db)
+    # Override materials section with file-aware info
+    preview["modules"]["materials"] = {
+        "total": mat_total, "new_count": mat_new, "conflict_count": mat_conflict,
+        "would_insert": mat_new, "would_skip": mat_skip,
+        "would_overwrite": mat_ow, "would_keep_both": mat_kb,
+    }
+    if mat_samples:
+        preview["conflict_samples"]["materials"] = mat_samples
+    preview["materials_count"] = mat_total
+
+    # ZIP-specific info
+    preview["zip_info"] = {
+        "file_count": len(zip_files),
+        "materials_with_files": len(materials_with_files),
+        "materials_without_files": len(materials_without_files),
+        "total_file_size": sum(zip_files.values()),
+        "manifest_present": "manifest.json" in names,
+    }
+
+    return preview
+
+
+@router.post("/zip")
+async def import_zip(
+    file: UploadFile = File(...),
+    strategy: str = Query(default="skip", description="冲突策略: skip / overwrite / keep_both"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import from a ZIP backup: restore files and data."""
+    if strategy not in VALID_STRATEGIES:
+        raise HTTPException(422, f"无效的冲突策略 '{strategy}'，支持: skip, overwrite, keep_both")
+
+    content = await file.read()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        raise HTTPException(422, "无效的 ZIP 文件")
+
+    if "backup.json" not in set(zf.namelist()):
+        raise HTTPException(422, "ZIP 缺少 backup.json")
+
+    try:
+        data = json.loads(zf.read("backup.json"))
+    except Exception:
+        raise HTTPException(422, "backup.json 格式错误")
+    _validate(data)
+
+    settings = get_settings()
+    upload_dir = os.path.abspath(settings.upload_dir)
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Build safe path map: stored_filename -> resolved absolute path
+    safe_paths: dict[str, str] = {}
+    for entry in zf.infolist():
+        if entry.is_dir():
+            continue
+        safe = _safe_zip_path(entry.filename, upload_dir)
+        if safe:
+            stored = os.path.basename(safe)
+            safe_paths[stored] = safe
+
+    inserted = {"materials": 0, "error_book": 0, "study_plans": 0,
+                "problems": 0, "chat_history": 0, "exam_questions": 0,
+                "exam_attempts": 0}
+    skipped = dict(inserted)
+    overwritten = dict(inserted)
+    kept_both = dict(inserted)
+    files_restored = 0
+    # Collect material IDs that need parse jobs (enqueued after commit)
+    _pending_parse_ids: list[int] = []
+
+    def _safe_delete_upload(stored_filename: str) -> None:
+        """Delete a file from upload_dir with the same path-safety check
+        used by materials.py._delete_uploaded_file."""
+        if not stored_filename:
+            return
+        upload_abs = os.path.abspath(upload_dir)
+        file_abs = os.path.abspath(os.path.join(upload_abs, stored_filename))
+        try:
+            if os.path.commonpath([upload_abs, file_abs]) != upload_abs:
+                return
+        except ValueError:
+            return
+        try:
+            if os.path.isfile(file_abs):
+                os.remove(file_abs)
+        except OSError:
+            pass
+
+    def _generate_unique_stored(ext: str) -> str:
+        """Generate a new UUID-based stored_filename that doesn't collide."""
+        from uuid import uuid4
+        return f"{uuid4().hex}{ext}"
+
+    # ── Materials with file restoration ──
+    for m in data.get("materials", []):
+        fn = m.get("filename", "")
+        ft = m.get("file_type", "")
+        stored = m.get("stored_filename", "")
+        has_file = stored in safe_paths
+
+        existing = await _exists(db, Material, Material.filename == fn, Material.file_type == ft)
+        if existing:
+            if strategy == "skip":
+                skipped["materials"] += 1
+            elif strategy == "overwrite":
+                if has_file:
+                    # Update existing record
+                    existing.status = "pending"
+                    existing.error_message = ""
+                    # Delete old file safely (using same check as materials.py)
+                    old_stored = existing.stored_filename or ""
+                    if old_stored and old_stored != stored:
+                        _safe_delete_upload(old_stored)
+                    existing.stored_filename = stored
+                    existing.content = ""
+                    # Write file from ZIP
+                    try:
+                        file_bytes = zf.read(f"uploads/{stored}")
+                        with open(safe_paths[stored], "wb") as f:
+                            f.write(file_bytes)
+                        files_restored += 1
+                    except (KeyError, OSError):
+                        pass
+                    _pending_parse_ids.append(existing.id)
+                    job = MaterialParseJob(material_id=existing.id, status="pending", attempts=0)
+                    db.add(job)
+                else:
+                    existing.status = "failed"
+                    existing.error_message = "备份中无可恢复文件，需手动重新上传"
+                    existing.content = ""
+                overwritten["materials"] += 1
+            else:  # keep_both
+                new_fn = _make_copy_name(fn, max_len=500)
+                # Generate a NEW stored_filename to avoid file-sharing
+                # between original and copy (deleting one would orphan the other)
+                ext = os.path.splitext(stored)[1] if stored else ft
+                new_stored = _generate_unique_stored(ext)
+                new_has_file = has_file
+                if new_has_file:
+                    rec = Material(filename=new_fn, file_type=ft, content="", stored_filename=new_stored, status="pending")
+                    db.add(rec)
+                    await db.flush()
+                    try:
+                        file_bytes = zf.read(f"uploads/{stored}")
+                        dest = os.path.join(upload_dir, new_stored)
+                        with open(dest, "wb") as f:
+                            f.write(file_bytes)
+                        files_restored += 1
+                    except (KeyError, OSError):
+                        pass
+                    # Create parse job for the new material
+                    job = MaterialParseJob(material_id=rec.id, status="pending", attempts=0)
+                    db.add(job)
+                    _pending_parse_ids.append(rec.id)
+                else:
+                    rec = Material(filename=new_fn, file_type=ft, content="", stored_filename="", status="failed", error_message="备份中无可恢复文件，需手动重新上传")
+                    db.add(rec)
+                    await db.flush()
+                kept_both["materials"] += 1
+        else:
+            if has_file:
+                rec = Material(filename=fn, file_type=ft, content="", stored_filename=stored, status="pending")
+                db.add(rec)
+                await db.flush()
+                try:
+                    file_bytes = zf.read(f"uploads/{stored}")
+                    with open(safe_paths[stored], "wb") as f:
+                        f.write(file_bytes)
+                    files_restored += 1
+                except (KeyError, OSError):
+                    pass
+                # Create parse job for new material
+                job = MaterialParseJob(material_id=rec.id, status="pending", attempts=0)
+                db.add(job)
+                _pending_parse_ids.append(rec.id)
+            else:
+                rec = Material(filename=fn, file_type=ft, content="", stored_filename="", status="failed", error_message="备份中无可恢复文件，需手动重新上传")
+                db.add(rec)
+                await db.flush()
+            inserted["materials"] += 1
+
+    # ── Error book (same as JSON import) ──
+    for e in data.get("error_book", []):
+        q = e.get("question", "")
+        et = e.get("error_type", "")
+        if not q:
+            skipped["error_book"] += 1
+            continue
+        existing = await _exists(db, ErrorBook, ErrorBook.question == q, ErrorBook.error_type == et)
+        if existing:
+            if strategy == "skip":
+                skipped["error_book"] += 1
+            elif strategy == "overwrite":
+                existing.subject = e.get("subject", "")
+                existing.chapter = e.get("chapter", "")
+                existing.knowledge_point = e.get("knowledge_point", "")
+                existing.user_answer = e.get("user_answer", "")
+                existing.correct_answer = e.get("correct_answer", "")
+                existing.error_reason = e.get("error_reason", "")
+                existing.correct_approach = e.get("correct_approach", "")
+                existing.review_suggestion = e.get("review_suggestion", "")
+                existing.tags = e.get("tags", "")
+                existing.next_review_date = e.get("next_review_date", "")
+                existing.mastered = e.get("mastered", False)
+                existing.review_count = e.get("review_count", 0)
+                overwritten["error_book"] += 1
+            else:
+                new_q = await _next_copy_question(db, q)
+                rec = ErrorBook(
+                    subject=e.get("subject", ""), chapter=e.get("chapter", ""),
+                    knowledge_point=e.get("knowledge_point", ""), question=new_q,
+                    user_answer=e.get("user_answer", ""), correct_answer=e.get("correct_answer", ""),
+                    error_type=et, error_reason=e.get("error_reason", ""),
+                    correct_approach=e.get("correct_approach", ""),
+                    review_suggestion=e.get("review_suggestion", ""),
+                    tags=e.get("tags", ""), next_review_date=e.get("next_review_date", ""),
+                    mastered=e.get("mastered", False), review_count=e.get("review_count", 0),
+                )
+                db.add(rec)
+                kept_both["error_book"] += 1
+        else:
+            rec = ErrorBook(
+                subject=e.get("subject", ""), chapter=e.get("chapter", ""),
+                knowledge_point=e.get("knowledge_point", ""), question=q,
+                user_answer=e.get("user_answer", ""), correct_answer=e.get("correct_answer", ""),
+                error_type=et, error_reason=e.get("error_reason", ""),
+                correct_approach=e.get("correct_approach", ""),
+                review_suggestion=e.get("review_suggestion", ""),
+                tags=e.get("tags", ""), next_review_date=e.get("next_review_date", ""),
+                mastered=e.get("mastered", False), review_count=e.get("review_count", 0),
+            )
+            db.add(rec)
+            inserted["error_book"] += 1
+
+    # ── Study plans ──
+    for p in data.get("study_plans", []):
+        d, s, t = p.get("date", ""), p.get("subject", ""), p.get("task", "")
+        if not d or not s or not t:
+            skipped["study_plans"] += 1
+            continue
+        existing = await _exists(db, StudyPlan, StudyPlan.date == d, StudyPlan.subject == s, StudyPlan.task == t)
+        if existing:
+            if strategy == "skip":
+                skipped["study_plans"] += 1
+            elif strategy == "overwrite":
+                existing.completed = p.get("completed", False)
+                overwritten["study_plans"] += 1
+            else:
+                rec = StudyPlan(date=d, subject=s, task=_make_copy_name(t, max_len=5000),
+                                completed=p.get("completed", False))
+                db.add(rec)
+                kept_both["study_plans"] += 1
+        else:
+            rec = StudyPlan(date=d, subject=s, task=t, completed=p.get("completed", False))
+            db.add(rec)
+            inserted["study_plans"] += 1
+
+    # ── Problems ──
+    for p in data.get("problems", []):
+        q = p.get("question", "")
+        if not q:
+            skipped["problems"] += 1
+            continue
+        existing = await _exists(db, ProblemRecord, ProblemRecord.question == q)
+        if existing:
+            if strategy == "skip":
+                skipped["problems"] += 1
+            elif strategy == "overwrite":
+                existing.solution = p.get("solution", "")
+                existing.subject = p.get("subject", "")
+                overwritten["problems"] += 1
+            else:
+                rec = ProblemRecord(question=_make_copy_name(q, max_len=10000),
+                                    solution=p.get("solution", ""), subject=p.get("subject", ""))
+                db.add(rec)
+                kept_both["problems"] += 1
+        else:
+            rec = ProblemRecord(question=q, solution=p.get("solution", ""), subject=p.get("subject", ""))
+            db.add(rec)
+            inserted["problems"] += 1
+
+    # ── Chat history ──
+    for c in data.get("chat_history", []):
+        q, a = c.get("question", ""), c.get("answer", "")
+        if not q or not a:
+            skipped["chat_history"] += 1
+            continue
+        existing = await _exists(db, ChatHistory, ChatHistory.question == q, ChatHistory.answer == a)
+        if existing:
+            if strategy == "skip":
+                skipped["chat_history"] += 1
+            elif strategy == "overwrite":
+                skipped["chat_history"] += 1
+            else:
+                rec = ChatHistory(question=_make_copy_name(q), answer=a, conversation_id=c.get("conversation_id", ""))
+                db.add(rec)
+                kept_both["chat_history"] += 1
+        else:
+            rec = ChatHistory(question=q, answer=a, conversation_id=c.get("conversation_id", ""))
+            db.add(rec)
+            inserted["chat_history"] += 1
+
+    # ── Exam questions ──
+    old_id_to_new: dict[int, int] = {}
+    for eq in data.get("exam_questions", []):
+        title = eq.get("title", "")
+        question = eq.get("question", "")
+        if not title or not question:
+            skipped["exam_questions"] += 1
+            continue
+        dup = await db.execute(
+            select(ExamQuestion.id).where(
+                ExamQuestion.title == title, ExamQuestion.question == question
+            ).limit(1)
+        )
+        existing_id = dup.scalars().first()
+        if existing_id is not None:
+            if strategy == "skip":
+                skipped["exam_questions"] += 1
+            elif strategy == "overwrite":
+                existing_rec = await db.get(ExamQuestion, existing_id)
+                if existing_rec:
+                    existing_rec.subject = eq.get("subject", "")
+                    existing_rec.year = eq.get("year", "")
+                    existing_rec.answer = eq.get("answer", "")
+                    existing_rec.solution = eq.get("solution", "")
+                    existing_rec.tags = eq.get("tags", "")
+                    overwritten["exam_questions"] += 1
+            else:
+                new_title = await _next_copy_title(db, title)
+                rec = ExamQuestion(
+                    title=new_title, subject=eq.get("subject", ""), year=eq.get("year", ""),
+                    question=question, answer=eq.get("answer", ""), solution=eq.get("solution", ""),
+                    tags=eq.get("tags", ""),
+                )
+                db.add(rec)
+                await db.flush()
+                kept_both["exam_questions"] += 1
+                if eq.get("id"):
+                    old_id_to_new[eq["id"]] = rec.id
+                continue
+            if eq.get("id"):
+                old_id_to_new[eq["id"]] = existing_id
+            continue
+        rec = ExamQuestion(
+            title=title, subject=eq.get("subject", ""), year=eq.get("year", ""),
+            question=question, answer=eq.get("answer", ""), solution=eq.get("solution", ""),
+            tags=eq.get("tags", ""),
+        )
+        db.add(rec)
+        await db.flush()
+        inserted["exam_questions"] += 1
+        if eq.get("id"):
+            old_id_to_new[eq["id"]] = rec.id
+
+    # ── Exam attempts ──
+    for ea in data.get("exam_attempts", []):
+        old_qid = ea.get("question_id")
+        new_qid = old_id_to_new.get(old_qid) if old_qid else None
+        if new_qid is None:
+            if old_qid and await _exists(db, ExamQuestion, ExamQuestion.id == old_qid):
+                new_qid = old_qid
+            else:
+                skipped["exam_attempts"] += 1
+                continue
+        rec = ExamAttempt(
+            question_id=new_qid,
+            user_answer=ea.get("user_answer", ""),
+            is_correct=ea.get("is_correct", False),
+        )
+        db.add(rec)
+        inserted["exam_attempts"] += 1
+
+    # ── App settings (review intervals, etc.) — v0.3+ optional ──
+    settings_imported, settings_skipped, settings_warnings = await _import_app_settings(db, data, strategy)
+
+    # ── Study sessions — v0.3+ optional, idempotent ──
+    sessions_imported, sessions_skipped, sessions_kept_both = await _import_study_sessions(db, data, strategy)
+    kept_both["study_sessions"] = sessions_kept_both
+
+    await db.commit()
+
+    # Start parse worker for newly imported materials with files
+    if _pending_parse_ids:
+        try:
+            from app.services.parse_worker import get_worker
+            worker = get_worker()
+            for mid in _pending_parse_ids:
+                await worker.enqueue(mid)
+        except Exception:
+            pass  # parse worker not started yet or other non-critical error
+
+    result = {
+        "inserted": inserted,
+        "skipped": skipped,
+        "overwritten": overwritten,
+        "kept_both": kept_both,
+        "files_restored": files_restored,
+        "settings_imported": settings_imported,
+        "settings_skipped": settings_skipped,
+        "sessions_imported": sessions_imported,
+        "sessions_skipped": sessions_skipped,
+    }
+    if settings_warnings:
+        result["settings_warnings"] = settings_warnings
+
+    # Log the operation
+    log_summary = {k: {m: v for m, v in counts.items() if v > 0} for k, counts in
+                   {"inserted": inserted, "skipped": skipped, "overwritten": overwritten, "kept_both": kept_both}.items()}
+    log_summary["files_restored"] = files_restored
+    log_summary["settings_imported"] = settings_imported
+    log_summary["sessions_imported"] = sessions_imported
+    log = OperationLog(operation_type="import_zip", file_type="zip", strategy=strategy,
+                       result_summary=json.dumps(log_summary, ensure_ascii=False))
+    db.add(log)
+    await db.commit()
+
+    return result

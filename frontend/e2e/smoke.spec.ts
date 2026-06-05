@@ -499,3 +499,157 @@ test.describe('review queue', () => {
     }
   });
 });
+
+test.describe('ZIP backup', () => {
+  test('sidebar shows ZIP export/import buttons', async ({ page }) => {
+    await page.goto('/');
+    // Export buttons
+    await expect(page.getByRole('button', { name: /数据 JSON/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /完整 ZIP/ })).toBeVisible();
+    // Import buttons (labels)
+    await expect(page.getByText('导入 JSON')).toBeVisible();
+    await expect(page.getByText('导入 ZIP')).toBeVisible();
+  });
+
+  test('ZIP import preview shows settings and sessions', async ({ page }) => {
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    const marker = `E2EZIPSS-${Date.now()}`;
+
+    // Create a session and set custom review intervals
+    await page.request.put(`${apiBase}/settings/review`, { data: { intervals: [2, 5, 10] } });
+    const sessRes = await page.request.post(`${apiBase}/sessions/start`, { data: { subject: marker, note: 'e2e' } });
+    const sess = await sessRes.json();
+    await page.waitForTimeout(500);
+    await page.request.post(`${apiBase}/sessions/${sess.id}/stop`);
+
+    // Export ZIP
+    const zipRes = await page.request.get(`${apiBase}/export/zip`);
+    const zipBuffer = await zipRes.body();
+
+    // Reset intervals
+    await page.request.put(`${apiBase}/settings/review`, { data: { intervals: [1, 3, 7, 14] } });
+
+    // Import preview
+    await page.goto('/');
+    const zipInput = page.locator('input[type="file"][accept=".zip"]');
+    await zipInput.setInputFiles({
+      name: `${marker}_backup.zip`,
+      mimeType: 'application/zip',
+      buffer: Buffer.from(zipBuffer),
+    });
+
+    await expect(page.getByText(/完整备份预览/)).toBeVisible({ timeout: 10_000 });
+
+    // Preview should show settings and sessions counts (use the summary line)
+    await expect(page.getByText(/设置: [1-9]/)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/会话:.*[1-9]/).first()).toBeVisible({ timeout: 5_000 });
+
+    // Cancel
+    await page.getByRole('button', { name: '取消' }).click();
+
+    // Cleanup
+    await page.request.delete(`${apiBase}/materials/0`).catch(() => {});
+  });
+
+  test('ZIP import preview flow with strategy selector', async ({ page }) => {
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    const marker = `E2EZIP-${Date.now()}`;
+
+    // Create a material via API to have data in the backup
+    const uploadRes = await page.request.post(`${apiBase}/materials/upload`, {
+      multipart: {
+        file: { name: `${marker}.txt`, mimeType: 'text/plain', buffer: Buffer.from(`ZIP E2E 测试内容 ${marker}`, 'utf-8') },
+      },
+    });
+    const mat = await uploadRes.json();
+
+    // Wait for parsing
+    for (let i = 0; i < 30; i++) {
+      const r = await page.request.get(`${apiBase}/materials/${mat.id}`);
+      const d = await r.json();
+      if (d.status === 'ready' || d.status === 'failed') break;
+      await page.waitForTimeout(200);
+    }
+
+    // Download ZIP via API
+    const zipRes = await page.request.get(`${apiBase}/export/zip`);
+    const zipBuffer = await zipRes.body();
+
+    // Navigate to page and trigger ZIP import preview
+    await page.goto('/');
+    const zipInput = page.locator('input[type="file"][accept=".zip"]');
+    await zipInput.setInputFiles({
+      name: `${marker}_backup.zip`,
+      mimeType: 'application/zip',
+      buffer: Buffer.from(zipBuffer),
+    });
+
+    // Preview should appear
+    await expect(page.getByText(/完整备份预览/)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/📦/)).toBeVisible();
+    await expect(page.getByText(/个文件/)).toBeVisible();
+
+    // Strategy selector should be visible
+    await expect(page.getByText('冲突策略：')).toBeVisible();
+    await expect(page.getByRole('radio', { name: /跳过/ })).toBeVisible();
+    await expect(page.getByRole('radio', { name: /覆盖/ })).toBeVisible();
+    await expect(page.getByRole('radio', { name: /保留两份/ })).toBeVisible();
+
+    // Change strategy to overwrite
+    await page.getByRole('radio', { name: /覆盖/ }).click();
+    // Preview should refresh
+    await expect(page.getByText(/完整备份预览/)).toBeVisible({ timeout: 10_000 });
+
+    // Cancel the import
+    await page.getByRole('button', { name: '取消' }).click();
+    await expect(page.getByText(/完整备份预览/)).toHaveCount(0);
+
+    // Cleanup
+    await page.request.delete(`${apiBase}/materials/${mat.id}`);
+  });
+});
+
+test.describe('data maintenance', () => {
+  test('sidebar has data maintenance link', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByRole('link', { name: /数据维护/ })).toBeVisible();
+  });
+
+  test('maintenance page loads health summary', async ({ page }) => {
+    await page.goto('/maintenance');
+    await expect(page.getByRole('heading', { name: '数据维护中心' })).toBeVisible();
+    // Health summary cards should load
+    await expect(page.getByText('资料记录')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('上传文件')).toBeVisible();
+    await expect(page.getByText('数据库大小')).toBeVisible();
+    // Use exact match to avoid strict mode violations
+    await expect(page.getByText('孤儿文件', { exact: true })).toBeVisible();
+    await expect(page.getByText('缺失文件', { exact: true })).toBeVisible();
+  });
+
+  test('cleanup preview opens and shows results', async ({ page }) => {
+    await page.goto('/maintenance');
+    // Wait for health data to load
+    await expect(page.getByText('资料记录')).toBeVisible({ timeout: 10_000 });
+
+    // Click preview cleanup
+    await page.getByRole('button', { name: '预览清理' }).click();
+
+    // Preview results should appear
+    await expect(page.getByText('清理预览：')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/孤儿文件.*个/)).toBeVisible();
+    await expect(page.getByText(/无效解析任务.*个/)).toBeVisible();
+  });
+
+  test('operation logs load and display entries', async ({ page }) => {
+    // Create some operation history by exporting
+    const apiBase = `http://127.0.0.1:${process.env.E2E_BACKEND_PORT || 18000}/api`;
+    await page.request.get(`${apiBase}/export/json`);
+
+    await page.goto('/maintenance');
+    // Wait for logs section
+    await expect(page.getByRole('heading', { name: '操作记录' })).toBeVisible({ timeout: 10_000 });
+    // Should have at least one log entry
+    await expect(page.getByText('导出 JSON').first()).toBeVisible({ timeout: 10_000 });
+  });
+});

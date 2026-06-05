@@ -1,6 +1,6 @@
 # 考研长期陪跑学习助手
 
-> **当前版本：MVP v0.4** — 单用户个人学习工具，可本地运行或自托管。数据全部保存在你的电脑上，不上传到任何服务器。
+> **当前版本：MVP v0.6** — 单用户个人学习工具，可本地运行或自托管。数据全部保存在你的电脑上，不上传到任何服务器。
 
 基于 AI 问答 + 资料库 RAG 的考研学习辅助工具，支持数学公式 LaTeX 渲染。覆盖「资料上传 → AI 问答/题目解析 → 加入错题本 → 今日复习 → 学习计划/工作台」的完整学习闭环。
 
@@ -24,7 +24,8 @@
 | 真题练习（手动录入/提交答案/加入错题本） | ✅ | |
 | 学习工作台（任务/打卡/趋势/计时） | ✅ | |
 | 全局搜索（跨模块检索） | ✅ | |
-| 数据导出/导入备份 | ✅ | |
+| 数据导出/导入备份（JSON + 完整 ZIP） | ✅ | |
+| 数据维护中心（健康检查/清理/操作日志） | ✅ | |
 | 扫描版 PDF OCR（识别图片中的文字） | ✅（需安装 Tesseract） | |
 | AI 问答（自动检索资料库回答） | | ✅ |
 | 题目解析（AI 返回解题步骤） | | ✅ |
@@ -123,7 +124,7 @@ npm run dev
 1. **上传资料**：进入「资料库」页面，上传你的 PDF/Word/TXT/MD 学习资料
 2. **手动录入错题**：进入「错题本」页面，录入做错的题目
 3. **今日复习**：工作台会显示今日待复习的错题数量，点击进入复习队列
-4. **导入备份**：如果之前有导出的备份 JSON，点击侧边栏「导入备份」恢复数据
+4. **导入备份**：如果之前有备份，点击侧边栏「导入 ZIP」或「导入 JSON」恢复数据
 
 ## 扫描版 PDF OCR（可选）
 
@@ -155,10 +156,12 @@ TESSDATA_DIR=./tessdata
 详见 [docs/backup-restore.md](docs/backup-restore.md)。
 
 **要点：**
-- 侧边栏「导出数据备份」→ 下载 JSON 文件（含所有学习记录，不含上传原文件）
-- 侧边栏「导入备份」→ 选择 JSON 文件恢复
-- 完整迁移需额外复制 `backend/uploads/` 目录（上传的资料文件）
-- API Key 不包含在导出中，新电脑需重新配置
+- 侧边栏「完整 ZIP」→ 完整备份（学习记录 + 上传原文件 + 复习间隔 + 学习会话），推荐用于整机迁移
+- 侧边栏「数据 JSON」→ 仅学习记录和配置（轻量备份，不含上传原文件）
+- 侧边栏「导入 ZIP」→ 从完整备份恢复（自动恢复文件 + 重建索引 + 恢复设置）
+- 侧边栏「导入 JSON」→ 从 JSON 恢复学习记录（资料 overwrite 不会清空已有文件内容）
+- API Key 不包含在任何导出中，新电脑需重新配置
+- 备份格式 v0.3 兼容导入 v0.2 格式的旧备份
 
 ## 数据安全
 
@@ -202,6 +205,7 @@ TESSDATA_DIR=./tessdata
 | 真题练习 | `/exam` | 题库管理，AI 出题，提交答案，一键加入错题本 |
 | 今日复习 | `/review` | 优先级排序复习队列，展开解析，标记掌握/仍需复习/明日再来/跳过 |
 | 全局搜索 | `/search` | 跨模块搜索，类型筛选，点击跳转定位 |
+| 数据维护 | `/maintenance` | 数据健康摘要、孤儿文件清理、操作日志 |
 | 命令面板 | Ctrl+K | 快速搜索页面和动作 |
 | 侧边栏 | — | 折叠/展开，主题切换（浅色/深色/跟随系统） |
 
@@ -305,14 +309,21 @@ math_agent/
 | POST | `/api/exam/questions/{id}/attempt` | 提交答案 |
 | POST | `/api/exam/questions/{id}/add-to-errors` | 加入错题本 |
 | DELETE | `/api/exam/questions/{id}` | 删除真题 |
-| GET | `/api/export/json` | 导出备份 |
-| POST | `/api/import/preview` | 导入预检 |
-| POST | `/api/import/json` | 导入备份 |
+| GET | `/api/export/json` | 导出数据 JSON |
+| GET | `/api/export/zip` | 导出完整备份 ZIP |
+| POST | `/api/import/preview` | JSON 导入预检 |
+| POST | `/api/import/json` | JSON 导入 |
+| POST | `/api/import/zip/preview` | ZIP 导入预检 |
+| POST | `/api/import/zip` | ZIP 导入 |
 | GET | `/api/settings/review` | 获取复习间隔 |
 | PUT | `/api/settings/review` | 更新复习间隔 |
 | GET | `/api/review/queue` | 今日复习队列 |
 | POST | `/api/review/{id}/action` | 复习动作 |
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/maintenance/health` | 数据维护健康摘要 |
+| POST | `/api/maintenance/cleanup/preview` | 清理预览 |
+| POST | `/api/maintenance/cleanup` | 执行清理 |
+| GET | `/api/maintenance/logs` | 操作日志 |
 
 </details>
 
@@ -345,7 +356,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 -NoOpenBrowse
 powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
 ```
 
-截至当前版本，后端冒烟测试 **757 passed, 0 failed**，前端 E2E 测试 **14 passed**。
+截至当前版本，后端冒烟测试 **865 passed, 0 failed**，前端 E2E 测试 **20 passed**。
 
 ## License
 

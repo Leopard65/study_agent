@@ -135,3 +135,16 @@ class StudySession(Base):
     ended_at = Column(DateTime, nullable=True)
     duration_minutes = Column(Integer, default=0)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class OperationLog(Base):
+    """Audit log for backup/import/cleanup operations."""
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    operation_type = Column(String(30), nullable=False, index=True)  # export_json/export_zip/import_json/import_zip/cleanup
+    file_type = Column(String(10), default="")  # json/zip/empty
+    strategy = Column(String(20), default="")  # skip/overwrite/keep_both/empty
+    result_summary = Column(Text, default="")  # JSON string with counts
+    error_message = Column(Text, default="")
+    created_at = Column(DateTime, server_default=func.now())

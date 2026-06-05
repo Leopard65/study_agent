@@ -5,6 +5,19 @@
 import json
 import os
 import sys
+import io
+
+# Fix Windows console encoding: force UTF-8 for stdout/stderr
+if sys.platform == "win32":
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name)
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        elif isinstance(_stream, io.TextIOWrapper):
+            setattr(sys, _stream_name, io.TextIOWrapper(_stream.buffer, encoding="utf-8", errors="replace"))
 
 # 确保 backend/ 在 sys.path 中，以便 import app
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -997,7 +1010,7 @@ def run(client: TestClient):
 
     data = r.json()
     check("has exported_at", "exported_at" in data)
-    check("has version", data.get("version") == "0.2")
+    check("has version", data.get("version") == "0.3")
     check("has materials", "materials" in data)
     check("has material_chunks_count", "material_chunks_count" in data)
     check("has chat_history", "chat_history" in data)
@@ -2657,11 +2670,11 @@ def run(client: TestClient):
     # ── 29i. Version consistency ──
     print("\n[29i] Version consistency")
     from app.main import app as fastapi_app
-    check("FastAPI version=0.4.0", fastapi_app.version == "0.4.0", f"got {fastapi_app.version}")
+    check("FastAPI version=0.6.0", fastapi_app.version == "0.6.0", f"got {fastapi_app.version}")
 
     # Export should still use BACKUP_SCHEMA_VERSION
     r = client.get("/api/export/json")
-    check("export version=0.2", r.json().get("version") == "0.2", f"got {r.json().get('version')}")
+    check("export version=0.3", r.json().get("version") == "0.3", f"got {r.json().get('version')}")
 
     # ── 30. Placeholder API Key → AI endpoints return 503 ──
     print("\n[30] Placeholder API Key → AI endpoints return 503")
@@ -2762,6 +2775,1171 @@ def run(client: TestClient):
         os.environ["OPENAI_BASE_URL"] = _orig_url
         _gs.cache_clear()
         reset_client()
+
+    # ── 32. ZIP export structure ──
+    print("\n[32] GET /api/export/zip — ZIP structure")
+    import zipfile
+    import io
+
+    # Upload a test file first so the ZIP has content
+    zip_test_file = os.path.join(_tmp_dir, "zip_source.txt")
+    with open(zip_test_file, "w", encoding="utf-8") as f:
+        f.write("ZIP 导出测试内容，用于验证完整备份。")
+    r = client.post("/api/materials/upload", files={"file": ("zip_source.txt", open(zip_test_file, "rb"), "text/plain")})
+    check("zip: upload source file 200", r.status_code == 200, f"got {r.status_code}")
+    zip_mat_id = r.json()["id"]
+    zip_stored = r.json().get("stored_filename", "")
+
+    # Wait for parsing
+    import time
+    for _ in range(30):
+        r = client.get(f"/api/materials/{zip_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+        time.sleep(0.2)
+    check("zip: source material parsed", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Export ZIP
+    r = client.get("/api/export/zip")
+    check("zip: export 200", r.status_code == 200, f"got {r.status_code}")
+    check("zip: content-type is zip", "zip" in r.headers.get("content-type", ""), f"ct={r.headers.get('content-type')}")
+    check("zip: content-disposition has .zip", ".zip" in r.headers.get("content-disposition", ""), f"cd={r.headers.get('content-disposition')}")
+
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    names = set(zf.namelist())
+    check("zip: contains manifest.json", "manifest.json" in names)
+    check("zip: contains backup.json", "backup.json" in names)
+    check("zip: contains uploads/ dir", any(n.startswith("uploads/") for n in names), f"names={sorted(names)}")
+
+    # Validate manifest.json
+    manifest = json.loads(zf.read("manifest.json"))
+    check("zip: manifest version", manifest.get("version") == "0.3", f"got {manifest.get('version')}")
+    check("zip: manifest backup_type", manifest.get("backup_type") == "full_zip")
+    check("zip: manifest file_count >= 1", manifest.get("file_count", 0) >= 1, f"got {manifest.get('file_count')}")
+    check("zip: manifest has files list", isinstance(manifest.get("files"), list))
+
+    # Validate backup.json
+    backup = json.loads(zf.read("backup.json"))
+    check("zip: backup version", backup.get("version") == "0.3")
+    check("zip: backup has materials", len(backup.get("materials", [])) >= 1)
+    check("zip: backup has error_book", isinstance(backup.get("error_book"), list))
+    check("zip: backup has study_plans", isinstance(backup.get("study_plans"), list))
+
+    # Verify backup.json materials include stored_filename (needed for import)
+    backup_mats = backup.get("materials", [])
+    if backup_mats:
+        first_mat = backup_mats[0]
+        check("zip: backup material has stored_filename", "stored_filename" in first_mat)
+        check("zip: backup material has status", "status" in first_mat)
+        check("zip: backup material has error_message", "error_message" in first_mat)
+
+    # Verify manifest files cross-reference with materials
+    manifest_files_set = {f["stored_filename"] for f in manifest.get("files", [])}
+    mat_stored_set = {m["stored_filename"] for m in backup_mats if m.get("stored_filename")}
+    check("zip: manifest files subset of material stored_filenames",
+          manifest_files_set <= mat_stored_set,
+          f"manifest={sorted(manifest_files_set)}, mats={sorted(mat_stored_set)}")
+
+    # Validate uploaded file is in ZIP
+    if zip_stored:
+        file_path = f"uploads/{zip_stored}"
+        check("zip: uploaded file in ZIP", file_path in names, f"looking for {file_path} in {sorted(names)}")
+        file_content = zf.read(file_path)
+        check("zip: uploaded file not empty", len(file_content) > 0)
+
+    zf.close()
+
+    # ── 33. ZIP import preview ──
+    print("\n[33] POST /api/import/zip/preview — ZIP preview")
+    zip_bytes = r.content  # reuse the exported ZIP
+
+    r = client.post(
+        "/api/import/zip/preview",
+        files={"file": ("test.zip", io.BytesIO(zip_bytes), "application/zip")},
+        params={"strategy": "skip"},
+    )
+    check("zip preview: 200", r.status_code == 200, f"got {r.status_code}")
+    pv = r.json()
+    check("zip preview: has version", pv.get("version") == "0.3")
+    check("zip preview: has modules", isinstance(pv.get("modules"), dict))
+    check("zip preview: has zip_info", isinstance(pv.get("zip_info"), dict))
+    zip_info = pv.get("zip_info", {})
+    check("zip preview: zip_info file_count >= 1", zip_info.get("file_count", 0) >= 1)
+    check("zip preview: zip_info manifest_present", zip_info.get("manifest_present") is True)
+
+    # ── 34. ZIP import — skip strategy (data already exists) ──
+    print("\n[34] POST /api/import/zip — skip strategy")
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("test.zip", io.BytesIO(zip_bytes), "application/zip")},
+        params={"strategy": "skip"},
+    )
+    check("zip import skip: 200", r.status_code == 200, f"got {r.status_code}")
+    result = r.json()
+    check("zip import skip: has inserted", isinstance(result.get("inserted"), dict))
+    check("zip import skip: has skipped", isinstance(result.get("skipped"), dict))
+    check("zip import skip: has files_restored", "files_restored" in result)
+    # Data already exists, so most should be skipped
+    check("zip import skip: materials skipped", result["skipped"]["materials"] >= 1, f"got {result['skipped']['materials']}")
+
+    # ── 35. ZIP import — file restoration ──
+    print("\n[35] ZIP import — file restoration verification")
+    # The file should exist in uploads dir
+    if zip_stored:
+        restored_path = os.path.join(_uploads_dir, zip_stored)
+        check("zip import: file restored to uploads", os.path.isfile(restored_path), f"path={restored_path}")
+        if os.path.isfile(restored_path):
+            with open(restored_path, "r", encoding="utf-8") as f:
+                restored_content = f.read()
+            check("zip import: file content matches", "ZIP 导出测试内容" in restored_content, f"content={restored_content[:50]}")
+
+    # Material should still be accessible
+    r = client.get(f"/api/materials/{zip_mat_id}")
+    check("zip import: material still accessible", r.status_code == 200)
+    check("zip import: material has content", len(r.json().get("preview", "")) > 0)
+
+    # ── 36. ZIP path traversal protection ──
+    print("\n[36] ZIP path traversal protection")
+    from app.routers.import_data import _safe_zip_path
+
+    test_upload_dir = os.path.abspath(_uploads_dir)
+
+    # Absolute path
+    check("safe_zip: rejects absolute path", _safe_zip_path("/etc/passwd", test_upload_dir) is None)
+    check("safe_zip: rejects absolute win path", _safe_zip_path("C:\\Windows\\system32\\cmd.exe", test_upload_dir) is None)
+
+    # Dot-dot traversal
+    check("safe_zip: rejects .. traversal", _safe_zip_path("../etc/passwd", test_upload_dir) is None)
+    check("safe_zip: rejects nested ..", _safe_zip_path("uploads/../../etc/passwd", test_upload_dir) is None)
+
+    # Backslash
+    check("safe_zip: rejects backslash", _safe_zip_path("uploads\\evil.txt", test_upload_dir) is None)
+
+    # Wrong directory
+    check("safe_zip: rejects non-uploads dir", _safe_zip_path("etc/passwd", test_upload_dir) is None)
+    check("safe_zip: rejects root file", _safe_zip_path("backup.json", test_upload_dir) is None)
+
+    # Disallowed extension
+    check("safe_zip: rejects .exe", _safe_zip_path("uploads/evil.exe", test_upload_dir) is None)
+    check("safe_zip: rejects .sh", _safe_zip_path("uploads/evil.sh", test_upload_dir) is None)
+
+    # Empty filename
+    check("safe_zip: rejects empty filename", _safe_zip_path("uploads/", test_upload_dir) is None)
+
+    # Valid paths
+    check("safe_zip: allows valid .txt", _safe_zip_path("uploads/abc123.txt", test_upload_dir) is not None)
+    check("safe_zip: allows valid .pdf", _safe_zip_path("uploads/abc123.pdf", test_upload_dir) is not None)
+    check("safe_zip: allows valid .docx", _safe_zip_path("uploads/test.docx", test_upload_dir) is not None)
+
+    # Test with a crafted malicious ZIP
+    mal_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(mal_zip_buf, "w") as mzf:
+        mzf.writestr("backup.json", json.dumps({
+            "exported_at": "2026-01-01T00:00:00", "version": "0.2",
+            "materials": [], "material_chunks_count": 0,
+            "chat_history": [], "error_book": [], "study_plans": [],
+            "problems": [], "exam_questions": [], "exam_attempts": [],
+        }))
+        mzf.writestr("uploads/../../../evil.txt", "path traversal payload")
+        mzf.writestr("uploads/..\\..\\evil2.txt", "backslash traversal")
+        mzf.writestr("C:\\Windows\\evil.exe", "absolute path")
+    mal_zip_buf.seek(0)
+
+    r = client.post(
+        "/api/import/zip/preview",
+        files={"file": ("malicious.zip", mal_zip_buf, "application/zip")},
+        params={"strategy": "skip"},
+    )
+    check("malicious zip: preview succeeds (ignores bad entries)", r.status_code == 200, f"got {r.status_code}")
+    if r.status_code == 200:
+        mal_pv = r.json()
+        mal_info = mal_pv.get("zip_info", {})
+        check("malicious zip: no files extracted", mal_info.get("file_count", 0) == 0, f"got {mal_info.get('file_count')}")
+
+    # Verify no evil files were written
+    evil_path1 = os.path.join(test_upload_dir, "..", "..", "evil.txt")
+    evil_path2 = os.path.join(test_upload_dir, "evil.txt")
+    check("malicious zip: no evil.txt in uploads", not os.path.exists(evil_path2))
+
+    # ── 37. ZIP import — keep_both strategy ──
+    print("\n[37] POST /api/import/zip — keep_both strategy")
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("test.zip", io.BytesIO(zip_bytes), "application/zip")},
+        params={"strategy": "keep_both"},
+    )
+    check("zip keep_both: 200", r.status_code == 200, f"got {r.status_code}")
+    kb_result = r.json()
+    check("zip keep_both: materials kept_both", kb_result["kept_both"]["materials"] >= 1, f"got {kb_result['kept_both']['materials']}")
+
+    # The kept_both material should exist with "(副本)" in filename
+    r = client.get("/api/materials", params={"limit": 100})
+    materials = r.json()
+    copy_materials = [m for m in materials if "(副本)" in m.get("filename", "")]
+    check("zip keep_both: copy material exists", len(copy_materials) >= 1, f"found {len(copy_materials)}")
+
+    # ── 38. ZIP import — overwrite strategy ──
+    print("\n[38] POST /api/import/zip — overwrite strategy")
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("test.zip", io.BytesIO(zip_bytes), "application/zip")},
+        params={"strategy": "overwrite"},
+    )
+    check("zip overwrite: 200", r.status_code == 200, f"got {r.status_code}")
+    ow_result = r.json()
+    check("zip overwrite: materials overwritten", ow_result["overwritten"]["materials"] >= 1, f"got {ow_result['overwritten']['materials']}")
+
+    # ── 39. Imported material viewable ──
+    print("\n[39] Imported material — viewable after overwrite")
+    r = client.get(f"/api/materials/{zip_mat_id}")
+    check("imported material: detail 200", r.status_code == 200)
+    detail = r.json()
+    # After overwrite, material is set to pending (parse worker not running in test)
+    check("imported material: status pending or ready", detail.get("status") in ("pending", "ready"), f"got {detail.get('status')}")
+    check("imported material: has stored_filename", len(detail.get("stored_filename", "")) > 0 or detail.get("stored_filename") == zip_stored)
+
+    # Verify the file was physically restored
+    if zip_stored:
+        restored = os.path.join(_uploads_dir, zip_stored)
+        check("imported material: file on disk", os.path.isfile(restored))
+
+    # Search for content (works for previously parsed materials)
+    r = client.post("/api/materials/search", json={"query": "ZIP 导出测试", "limit": 5})
+    check("imported material: search 200", r.status_code == 200)
+
+    # Cleanup: delete the test material
+    client.delete(f"/api/materials/{zip_mat_id}")
+    # Also delete the kept_both copy
+    for m in copy_materials:
+        client.delete(f"/api/materials/{m['id']}")
+
+    # ── 40. Maintenance health ──
+    print("\n[40] GET /api/maintenance/health")
+    r = client.get("/api/maintenance/health")
+    check("maintenance health: 200", r.status_code == 200, f"got {r.status_code}")
+    mh = r.json()
+    check("maintenance health: has total_materials", "total_materials" in mh)
+    check("maintenance health: has total_chunks", "total_chunks" in mh)
+    check("maintenance health: has upload_files", "upload_files" in mh)
+    check("maintenance health: has orphan_files", "orphan_files" in mh)
+    check("maintenance health: has missing_files", "missing_files" in mh)
+    check("maintenance health: has failed_materials", "failed_materials" in mh)
+    check("maintenance health: has failed_jobs", "failed_jobs" in mh)
+    check("maintenance health: has processing_jobs", "processing_jobs" in mh)
+    check("maintenance health: has database_size", "database_size" in mh)
+    check("maintenance health: has uploads_size", "uploads_size" in mh)
+    check("maintenance health: has total_operations", "total_operations" in mh)
+    check("maintenance health: has orphan_file_names", isinstance(mh.get("orphan_file_names"), list))
+    check("maintenance health: has missing_file_names", isinstance(mh.get("missing_file_names"), list))
+
+    # ── 41. Orphan file detection ──
+    print("\n[41] Orphan file detection")
+    # Create an orphan file in uploads dir
+    orphan_path = os.path.join(_uploads_dir, "orphan_test_file.txt")
+    with open(orphan_path, "w") as f:
+        f.write("orphan content")
+    check("orphan: file created", os.path.isfile(orphan_path))
+
+    # Health should detect it
+    r = client.get("/api/maintenance/health")
+    mh2 = r.json()
+    check("orphan: health detects orphan", mh2["orphan_files"] >= 1, f"got {mh2['orphan_files']}")
+    check("orphan: orphan_file_names includes it", "orphan_test_file.txt" in mh2.get("orphan_file_names", []))
+
+    # ── 42. Cleanup preview (no side effects) ──
+    print("\n[42] POST /api/maintenance/cleanup/preview")
+    r = client.post("/api/maintenance/cleanup/preview")
+    check("cleanup preview: 200", r.status_code == 200, f"got {r.status_code}")
+    cp = r.json()
+    check("cleanup preview: has orphan_files", isinstance(cp.get("orphan_files"), list))
+    check("cleanup preview: has invalid_jobs", isinstance(cp.get("invalid_jobs"), list))
+    check("cleanup preview: has orphan_chunk_materials", isinstance(cp.get("orphan_chunk_materials"), list))
+    check("cleanup preview: orphan_test_file in preview", "orphan_test_file.txt" in cp.get("orphan_files", []))
+    # Preview should NOT delete the file
+    check("cleanup preview: file still exists", os.path.isfile(orphan_path))
+
+    # ── 43. Missing file detection ──
+    print("\n[43] Missing file detection")
+    # Create a material with a stored_filename that doesn't exist on disk
+    missing_stored = "missing_file_test_abc123.txt"
+    from app.models import Material as _Mat
+    async def _create_missing():
+        async with async_session() as session:
+            m = _Mat(filename="missing_test.txt", file_type=".txt", content="test", stored_filename=missing_stored, status="ready")
+            session.add(m)
+            await session.commit()
+            return m.id
+    loop_missing = asyncio.new_event_loop()
+    missing_mat_id = loop_missing.run_until_complete(_create_missing())
+    loop_missing.close()
+
+    r = client.get("/api/maintenance/health")
+    mh3 = r.json()
+    check("missing: health detects missing file", mh3["missing_files"] >= 1, f"got {mh3['missing_files']}")
+    check("missing: missing_file_names includes it", missing_stored in mh3.get("missing_file_names", []))
+
+    # Cleanup: remove the test material
+    async def _delete_missing():
+        async with async_session() as session:
+            await session.execute(text("DELETE FROM materials WHERE id = :id"), {"id": missing_mat_id})
+            await session.commit()
+    loop_del = asyncio.new_event_loop()
+    loop_del.run_until_complete(_delete_missing())
+    loop_del.close()
+
+    # ── 44. Execute cleanup ──
+    print("\n[44] POST /api/maintenance/cleanup")
+    r = client.post("/api/maintenance/cleanup")
+    check("cleanup: 200", r.status_code == 200, f"got {r.status_code}")
+    cr = r.json()
+    check("cleanup: has deleted_files", isinstance(cr.get("deleted_files"), list))
+    check("cleanup: has skipped_files", isinstance(cr.get("skipped_files"), list))
+    check("cleanup: has deleted_jobs", isinstance(cr.get("deleted_jobs"), int))
+    check("cleanup: has deleted_chunks", isinstance(cr.get("deleted_chunks"), int))
+    check("cleanup: has errors", isinstance(cr.get("errors"), list))
+    check("cleanup: orphan file deleted", "orphan_test_file.txt" in cr.get("deleted_files", []))
+    check("cleanup: orphan file no longer on disk", not os.path.isfile(orphan_path))
+
+    # ── 45. Cleanup does not delete referenced files ──
+    print("\n[45] Cleanup safety — referenced files preserved")
+    # Upload a new file and verify it survives cleanup
+    safe_file = os.path.join(_tmp_dir, "safe_test.txt")
+    with open(safe_file, "w") as f:
+        f.write("this file should not be cleaned up")
+    r = client.post("/api/materials/upload", files={"file": ("safe_test.txt", open(safe_file, "rb"), "text/plain")})
+    check("safe upload: 200", r.status_code == 200)
+    safe_stored = r.json().get("stored_filename", "")
+    safe_mat_id = r.json()["id"]
+
+    if safe_stored:
+        r = client.post("/api/maintenance/cleanup")
+        cr2 = r.json()
+        check("safe: referenced file not deleted", safe_stored not in cr2.get("deleted_files", []))
+        check("safe: referenced file still on disk", os.path.isfile(os.path.join(_uploads_dir, safe_stored)))
+
+    client.delete(f"/api/materials/{safe_mat_id}")
+
+    # ── 46. Cleanup path safety ──
+    print("\n[46] Cleanup path safety")
+    # Verify cleanup only processes files inside upload_dir
+    from app.routers.maintenance import _safe_listdir
+    check("path safety: _safe_listdir works", isinstance(_safe_listdir(_uploads_dir), list))
+    check("path safety: _safe_listdir empty for nonexistent", _safe_listdir("/nonexistent/path") == [])
+
+    # ── 47. Operation logs ──
+    print("\n[47] GET /api/maintenance/logs")
+    r = client.get("/api/maintenance/logs")
+    check("logs: 200", r.status_code == 200, f"got {r.status_code}")
+    logs = r.json()
+    check("logs: is list", isinstance(logs, list))
+    check("logs: has entries", len(logs) >= 1, f"got {len(logs)}")
+    if logs:
+        log = logs[0]
+        check("logs: has id", "id" in log)
+        check("logs: has operation_type", "operation_type" in log)
+        check("logs: has created_at", "created_at" in log)
+        check("logs: has result_summary", "result_summary" in log)
+        # Should contain cleanup logs from our tests
+        cleanup_logs = [l for l in logs if l.get("operation_type") == "cleanup"]
+        check("logs: contains cleanup entries", len(cleanup_logs) >= 1, f"got {len(cleanup_logs)}")
+        # Should contain export logs
+        export_logs = [l for l in logs if "export" in l.get("operation_type", "")]
+        check("logs: contains export entries", len(export_logs) >= 1, f"got {len(export_logs)}")
+
+    # ── 48. Maintenance health reflects cleanup ──
+    print("\n[48] Health after cleanup")
+    r = client.get("/api/maintenance/health")
+    mh4 = r.json()
+    check("health after cleanup: no orphans", mh4["orphan_files"] == 0, f"got {mh4['orphan_files']}")
+    check("health after cleanup: operations logged", mh4["total_operations"] >= 1, f"got {mh4['total_operations']}")
+
+    # ── 49. Real ZIP migration: empty environment ──
+    print("\n[49] Real ZIP migration — empty DB + empty uploads")
+    # Upload a material and wait for it to parse
+    migrate_file = os.path.join(_tmp_dir, "migrate_test.txt")
+    with open(migrate_file, "w", encoding="utf-8") as f:
+        f.write("这是 ZIP 迁移测试内容，包含独特关键词 迁移验证ABC。")
+    r = client.post("/api/materials/upload", files={"file": ("migrate_test.txt", open(migrate_file, "rb"), "text/plain")})
+    check("migration: upload 200", r.status_code == 200, f"got {r.status_code}")
+    migrate_mat_id = r.json()["id"]
+    migrate_stored = r.json().get("stored_filename", "")
+    # Wait for parsing
+    import time
+    for _ in range(30):
+        r = client.get(f"/api/materials/{migrate_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+        time.sleep(0.2)
+    check("migration: material parsed", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Export ZIP
+    r = client.get("/api/export/zip")
+    check("migration: export zip 200", r.status_code == 200)
+    migrate_zip_bytes = r.content
+
+    # Delete the material and its file (simulate empty environment)
+    client.delete(f"/api/materials/{migrate_mat_id}")
+    if migrate_stored:
+        gone_path = os.path.join(_uploads_dir, migrate_stored)
+        if os.path.isfile(gone_path):
+            os.remove(gone_path)
+    check("migration: file deleted", not os.path.isfile(os.path.join(_uploads_dir, migrate_stored)))
+
+    # Verify no materials left
+    r = client.get("/api/materials", params={"limit": 100})
+    remaining = [m for m in r.json() if m.get("filename") == "migrate_test.txt"]
+    check("migration: material deleted from DB", len(remaining) == 0, f"found {len(remaining)}")
+
+    # Import ZIP into empty environment
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("migrate.zip", io.BytesIO(migrate_zip_bytes), "application/zip")},
+        params={"strategy": "skip"},
+    )
+    check("migration: import 200", r.status_code == 200, f"got {r.status_code}")
+    migrate_result = r.json()
+    check("migration: files_restored > 0", migrate_result["files_restored"] >= 1, f"got {migrate_result['files_restored']}")
+    check("migration: materials inserted", migrate_result["inserted"]["materials"] >= 1, f"got {migrate_result['inserted']['materials']}")
+
+    # Find the newly imported material
+    r = client.get("/api/materials", params={"limit": 100})
+    all_mats = r.json()
+    migrated = [m for m in all_mats if m.get("filename") == "migrate_test.txt"]
+    check("migration: material re-created", len(migrated) >= 1, f"found {len(migrated)}")
+
+    if migrated:
+        new_mat = migrated[0]
+        new_stored = new_mat.get("stored_filename", "")
+        check("migration: stored_filename non-empty", len(new_stored) > 0)
+        check("migration: file exists on disk", os.path.isfile(os.path.join(_uploads_dir, new_stored)))
+        # Wait for parse to complete (poll more aggressively)
+        new_mat_id = new_mat["id"]
+        final_status = new_mat.get("status", "")
+        for _ in range(75):
+            r = client.get(f"/api/materials/{new_mat_id}")
+            final_status = r.json().get("status", "")
+            if final_status in ("ready", "failed"):
+                break
+            time.sleep(0.2)
+        check("migration: re-parsed successfully", final_status == "ready", f"got {final_status}")
+
+        # Verify material content via DB (bypasses any caching)
+        async def _get_material_content(mid):
+            async with async_session() as session:
+                from app.models import Material as _Mat
+                m = await session.get(_Mat, mid)
+                return m.content if m else None
+        loop_gc = asyncio.new_event_loop()
+        db_content = loop_gc.run_until_complete(_get_material_content(new_mat_id))
+        loop_gc.close()
+        has_content = db_content is not None and len(db_content) > 0
+        check("migration: content in DB", has_content, f"len={len(db_content) if db_content else 0}")
+
+        # Verify preview via API
+        r = client.get(f"/api/materials/{new_mat_id}")
+        preview = r.json().get("preview", "")
+        check("migration: preview contains content", "迁移验证ABC" in preview, f"preview={preview[:80]}")
+
+        # Verify search works
+        r = client.post("/api/materials/search", json={"query": "迁移验证ABC", "limit": 5})
+        check("migration: search 200", r.status_code == 200)
+        search_results = r.json()
+        check("migration: search finds content", len(search_results) >= 1, f"got {len(search_results)} results")
+
+        # Cleanup
+        client.delete(f"/api/materials/{new_mat_id}")
+
+    # ── 50. keep_both: different stored_filename, independence ──
+    print("\n[50] keep_both — different stored_filename, file independence")
+    # Upload a fresh material
+    kb_file = os.path.join(_tmp_dir, "kb_test.txt")
+    with open(kb_file, "w", encoding="utf-8") as f:
+        f.write("keep_both 独立性测试内容 XYZ789")
+    r = client.post("/api/materials/upload", files={"file": ("kb_test.txt", open(kb_file, "rb"), "text/plain")})
+    check("kb independence: upload 200", r.status_code == 200)
+    kb_mat_id = r.json()["id"]
+    kb_stored = r.json().get("stored_filename", "")
+    # Wait for parse
+    for _ in range(30):
+        r = client.get(f"/api/materials/{kb_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+        time.sleep(0.2)
+
+    # Export ZIP
+    r = client.get("/api/export/zip")
+    kb_zip = r.content
+
+    # Import with keep_both
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("kb.zip", io.BytesIO(kb_zip), "application/zip")},
+        params={"strategy": "keep_both"},
+    )
+    check("kb import: 200", r.status_code == 200, f"got {r.status_code}")
+    kb_result = r.json()
+    check("kb import: kept_both >= 1", kb_result["kept_both"]["materials"] >= 1)
+
+    # Find the copy
+    r = client.get("/api/materials", params={"limit": 100})
+    kb_all = r.json()
+    kb_copy = [m for m in kb_all if "(副本)" in m.get("filename", "") and "kb_test" in m.get("filename", "")]
+    check("kb: copy exists", len(kb_copy) >= 1)
+
+    if kb_copy:
+        copy_mat = kb_copy[0]
+        copy_stored = copy_mat.get("stored_filename", "")
+        check("kb: copy has different stored_filename", copy_stored != kb_stored,
+              f"original={kb_stored}, copy={copy_stored}")
+        check("kb: copy file exists", os.path.isfile(os.path.join(_uploads_dir, copy_stored)))
+        check("kb: original file exists", os.path.isfile(os.path.join(_uploads_dir, kb_stored)))
+
+        # Delete the copy — original file should survive
+        client.delete(f"/api/materials/{copy_mat['id']}")
+        check("kb: original file still exists after copy delete",
+              os.path.isfile(os.path.join(_uploads_dir, kb_stored)))
+
+        # Verify original is still readable
+        r = client.get(f"/api/materials/{kb_mat_id}")
+        check("kb: original still readable", r.status_code == 200)
+        check("kb: original preview intact", "XYZ789" in r.json().get("preview", ""))
+
+    # Cleanup
+    client.delete(f"/api/materials/{kb_mat_id}")
+
+    # ── 51. worker.enqueue await verification ──
+    print("\n[51] worker.enqueue await — parse job completes")
+    # Upload → export → delete → import → verify parse completes
+    we_file = os.path.join(_tmp_dir, "we_test.txt")
+    with open(we_file, "w", encoding="utf-8") as f:
+        f.write("enqueue 测试内容 WE123")
+    r = client.post("/api/materials/upload", files={"file": ("we_test.txt", open(we_file, "rb"), "text/plain")})
+    check("enqueue: upload 200", r.status_code == 200)
+    we_mat_id = r.json()["id"]
+    for _ in range(30):
+        r = client.get(f"/api/materials/{we_mat_id}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+        time.sleep(0.2)
+    check("enqueue: parsed", r.json().get("status") == "ready")
+    # Export
+    r = client.get("/api/export/zip")
+    we_zip = r.content
+    # Delete
+    client.delete(f"/api/materials/{we_mat_id}")
+
+    # Import (will create new material + parse job)
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("we.zip", io.BytesIO(we_zip), "application/zip")},
+        params={"strategy": "skip"},
+    )
+    check("enqueue: import 200", r.status_code == 200)
+    we_inserted = r.json()["inserted"]["materials"]
+    check("enqueue: material inserted", we_inserted >= 1)
+
+    # Find the new material and wait for parse
+    r = client.get("/api/materials", params={"limit": 100})
+    we_mats = [m for m in r.json() if m.get("filename") == "we_test.txt"]
+    if we_mats:
+        we_new_id = we_mats[0]["id"]
+        we_new_status = we_mats[0].get("status", "")
+        # The enqueue is async — poll for up to 15 seconds
+        for _ in range(75):
+            r = client.get(f"/api/materials/{we_new_id}")
+            we_new_status = r.json().get("status", "")
+            if we_new_status in ("ready", "failed"):
+                break
+            time.sleep(0.2)
+        check("enqueue: parse completed after import", we_new_status == "ready", f"got {we_new_status}")
+        r = client.get(f"/api/materials/{we_new_id}")
+        check("enqueue: content available", "WE123" in r.json().get("preview", ""))
+        client.delete(f"/api/materials/{we_new_id}")
+
+    # ── 52. cleanup deleted_chunks counts real rows ──
+    print("\n[52] cleanup deleted_chunks — real row count")
+    # Create orphan chunks directly in DB
+    async def _create_orphan_chunks():
+        async with async_session() as session:
+            # Use a non-existent material_id
+            from app.models import MaterialChunk as _MC
+            for i in range(5):
+                session.add(_MC(material_id=999999, chunk_index=i, content=f"orphan chunk {i}"))
+            await session.commit()
+    loop_oc = asyncio.new_event_loop()
+    loop_oc.run_until_complete(_create_orphan_chunks())
+    loop_oc.close()
+
+    # Preview should show orphan chunks
+    r = client.post("/api/maintenance/cleanup/preview")
+    cp2 = r.json()
+    check("real chunks: orphan material detected", 999999 in cp2.get("orphan_chunk_materials", []))
+
+    # Cleanup
+    r = client.post("/api/maintenance/cleanup")
+    cr3 = r.json()
+    check("real chunks: deleted_chunks = 5", cr3["deleted_chunks"] == 5, f"got {cr3['deleted_chunks']}")
+
+    # ── 53. /api/maintenance/logs limit validation ──
+    print("\n[53] /api/maintenance/logs limit validation")
+    r = client.get("/api/maintenance/logs", params={"limit": 0})
+    check("logs limit=0: 422", r.status_code == 422, f"got {r.status_code}")
+    r = client.get("/api/maintenance/logs", params={"limit": 101})
+    check("logs limit=101: 422", r.status_code == 422, f"got {r.status_code}")
+    r = client.get("/api/maintenance/logs", params={"limit": 1})
+    check("logs limit=1: 200", r.status_code == 200, f"got {r.status_code}")
+    r = client.get("/api/maintenance/logs", params={"limit": 100})
+    check("logs limit=100: 200", r.status_code == 200, f"got {r.status_code}")
+
+    # ── 54. Export includes app_settings and study_sessions ──
+    print("\n[54] Export includes app_settings and study_sessions")
+    # Set custom review intervals
+    r = client.put("/api/settings/review", json={"intervals": [2, 5, 12]})
+    check("set custom intervals 200", r.status_code == 200)
+
+    # Start a study session
+    r = client.post("/api/sessions/start", json={"subject": "备份测试", "note": "导出验证"})
+    check("start backup session 200", r.status_code == 200)
+    backup_sess_id = r.json()["id"]
+    time.sleep(1)
+    r = client.post(f"/api/sessions/{backup_sess_id}/stop")
+    check("stop backup session 200", r.status_code == 200)
+
+    # Export JSON and verify fields
+    r = client.get("/api/export/json")
+    check("export with settings 200", r.status_code == 200)
+    exp_data = r.json()
+    check("export has app_settings", "app_settings" in exp_data)
+    check("export has study_sessions", "study_sessions" in exp_data)
+    # Verify review intervals in app_settings
+    exported_intervals = None
+    for s in exp_data.get("app_settings", []):
+        if s.get("key") == "review_intervals":
+            exported_intervals = json.loads(s["value"])
+            break
+    check("exported intervals found", exported_intervals is not None, f"got {exported_intervals}")
+    check("exported intervals match [2,5,12]", exported_intervals == [2, 5, 12], f"got {exported_intervals}")
+    # Verify study session present
+    exported_sessions = exp_data.get("study_sessions", [])
+    check("exported sessions has our session", any(s.get("subject") == "备份测试" for s in exported_sessions),
+          f"got {[s.get('subject') for s in exported_sessions]}")
+
+    # Export ZIP and verify fields
+    r = client.get("/api/export/zip")
+    check("zip export with settings 200", r.status_code == 200)
+    zf_exp = zipfile.ZipFile(io.BytesIO(r.content))
+    zip_backup = json.loads(zf_exp.read("backup.json"))
+    check("zip backup has app_settings", "app_settings" in zip_backup)
+    check("zip backup has study_sessions", "study_sessions" in zip_backup)
+    zf_exp.close()
+
+    # Reset intervals to default
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("reset intervals 200", r.status_code == 200)
+
+    # ── 55. Review intervals roundtrip via ZIP import ──
+    print("\n[55] Review intervals roundtrip via ZIP import")
+    # Set custom intervals
+    r = client.put("/api/settings/review", json={"intervals": [3, 7, 21]})
+    check("set roundtrip intervals 200", r.status_code == 200)
+
+    # Export ZIP
+    r = client.get("/api/export/zip")
+    roundtrip_zip = r.content
+
+    # Reset to default
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("reset before import 200", r.status_code == 200)
+    check("reset confirms default", r.json()["intervals"] == [1, 3, 7, 14])
+
+    # Import ZIP with overwrite strategy
+    r = client.post(
+        "/api/import/zip",
+        files={"file": ("roundtrip.zip", io.BytesIO(roundtrip_zip), "application/zip")},
+        params={"strategy": "overwrite"},
+    )
+    check("roundtrip import 200", r.status_code == 200)
+    check("roundtrip settings_imported >= 1", r.json().get("settings_imported", 0) >= 1,
+          f"got {r.json().get('settings_imported')}")
+
+    # Verify intervals were restored
+    r = client.get("/api/settings/review")
+    check("roundtrip intervals restored", r.json()["intervals"] == [3, 7, 21],
+          f"got {r.json()['intervals']}")
+
+    # Reset to default
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("final reset 200", r.status_code == 200)
+
+    # ── 56. Orphan chunks + FTS cleanup ──
+    print("\n[56] Orphan chunks + FTS cleanup")
+    # Create orphan chunks AND corresponding FTS entries
+    async def _create_orphan_with_fts():
+        async with async_session() as session:
+            from app.models import MaterialChunk as _MC
+            for i in range(3):
+                mc = _MC(material_id=888888, chunk_index=i, content=f"orphan fts test chunk {i}")
+                session.add(mc)
+                await session.flush()
+                await session.execute(
+                    text("INSERT INTO chunks_fts (content, chunk_id, material_id) VALUES (:c, :cid, :mid)"),
+                    {"c": f"orphan fts test chunk {i}", "cid": mc.id, "mid": 888888},
+                )
+            await session.commit()
+    loop_ofts = asyncio.new_event_loop()
+    loop_ofts.run_until_complete(_create_orphan_with_fts())
+    loop_ofts.close()
+
+    # Verify orphan FTS entries exist
+    async def _count_fts_orphans():
+        async with async_session() as session:
+            r = await session.execute(text("SELECT COUNT(*) FROM chunks_fts WHERE material_id = :mid"), {"mid": 888888})
+            return r.scalar() or 0
+    loop_cfo = asyncio.new_event_loop()
+    fts_before = loop_cfo.run_until_complete(_count_fts_orphans())
+    loop_cfo.close()
+    check("orphan FTS entries exist before cleanup", fts_before >= 1, f"count={fts_before}")
+
+    # Run cleanup
+    r = client.post("/api/maintenance/cleanup")
+    check("orphan cleanup 200", r.status_code == 200)
+    check("orphan cleanup deleted_chunks >= 3", r.json()["deleted_chunks"] >= 3, f"got {r.json()['deleted_chunks']}")
+
+    # Verify FTS entries were also cleaned up
+    loop_cfo2 = asyncio.new_event_loop()
+    fts_after = loop_cfo2.run_until_complete(_count_fts_orphans())
+    loop_cfo2.close()
+    check("orphan FTS entries cleaned up", fts_after == 0, f"count={fts_after}")
+
+    # Search should not return ghost results
+    r = client.post("/api/materials/search", json={"query": "orphan fts test", "limit": 5})
+    check("ghost search 200", r.status_code == 200)
+    ghost_results = [x for x in r.json() if "orphan" in x.get("snippet", "").lower()]
+    check("no ghost search results", len(ghost_results) == 0, f"found {len(ghost_results)}")
+
+    # ── 57. JSON import overwrite preserves existing content ──
+    print("\n[57] JSON import overwrite preserves existing content")
+    # Upload a material with real content
+    preserve_file = os.path.join(_tmp_dir, "preserve_test.txt")
+    with open(preserve_file, "w", encoding="utf-8") as f:
+        f.write("JSON覆盖保留测试内容 IMPORTANT_PRESERVE")
+    with open(preserve_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("preserve_test.txt", f, "text/plain")})
+    check("preserve upload 200", r.status_code == 200)
+    preserve_mid = r.json()["id"]
+    preserve_stored = r.json().get("stored_filename", "")
+
+    # Wait for parsing
+    for _ in range(30):
+        time.sleep(0.1)
+        r = client.get(f"/api/materials/{preserve_mid}")
+        if r.json().get("status") in ("ready", "failed"):
+            break
+    check("preserve material parsed", r.json().get("status") == "ready", f"got {r.json().get('status')}")
+
+    # Create a JSON backup that includes this material
+    json_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.2",
+        "materials": [{"filename": "preserve_test.txt", "file_type": ".txt"}],
+        "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+    }
+
+    # Import with overwrite strategy
+    r = client.post("/api/import/json", json=json_backup, params={"strategy": "overwrite"})
+    check("preserve overwrite 200", r.status_code == 200)
+    check("preserve overwritten=1", r.json()["overwritten"]["materials"] == 1, f"got {r.json()['overwritten']['materials']}")
+
+    # Verify content and stored_filename are preserved
+    r = client.get(f"/api/materials/{preserve_mid}")
+    check("preserve detail 200", r.status_code == 200)
+    p_detail = r.json()
+    check("preserve content not cleared", "IMPORTANT_PRESERVE" in p_detail.get("preview", ""),
+          f"preview={p_detail.get('preview', '')[:80]}")
+    check("preserve stored_filename not cleared", p_detail.get("stored_filename") == preserve_stored,
+          f"got {p_detail.get('stored_filename')}")
+
+    # Cleanup
+    client.delete(f"/api/materials/{preserve_mid}")
+
+    # ── 58. Import 0.2 backup backward compatibility ──
+    print("\n[58] Import 0.2 backup backward compatibility")
+    old_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.2",
+        "materials": [], "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+    }
+    # Should not crash — missing app_settings and study_sessions fields are optional
+    r = client.post("/api/import/json", json=old_backup, params={"strategy": "skip"})
+    check("import 0.2 backup 200", r.status_code == 200, f"got {r.status_code}")
+    check("import 0.2 has settings_imported", "settings_imported" in r.json())
+    check("import 0.2 has sessions_imported", "sessions_imported" in r.json())
+
+    # ── 59. Import invalid review_intervals does not pollute settings ──
+    print("\n[59] Import invalid review_intervals rejected")
+    # Set known intervals first
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("set default intervals 200", r.status_code == 200)
+
+    # Try to import invalid intervals
+    bad_intervals_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.3",
+        "materials": [], "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+        "app_settings": [
+            {"key": "review_intervals", "value": "[3, 1]"},  # not strictly increasing
+        ],
+        "study_sessions": [],
+    }
+    r = client.post("/api/import/json", json=bad_intervals_backup, params={"strategy": "overwrite"})
+    check("bad intervals import 200", r.status_code == 200)
+    check("bad intervals settings_imported=0", r.json()["settings_imported"] == 0, f"got {r.json()['settings_imported']}")
+    check("bad intervals settings_skipped=1", r.json()["settings_skipped"] >= 1, f"got {r.json()['settings_skipped']}")
+    check("bad intervals has warnings", len(r.json().get("settings_warnings", [])) > 0)
+
+    # Verify intervals unchanged
+    r = client.get("/api/settings/review")
+    check("intervals still default", r.json()["intervals"] == [1, 3, 7, 14], f"got {r.json()['intervals']}")
+
+    # Try non-integer values
+    bad2_backup = dict(bad_intervals_backup)
+    bad2_backup["app_settings"] = [{"key": "review_intervals", "value": '["a", "b"]'}]
+    r = client.post("/api/import/json", json=bad2_backup, params={"strategy": "overwrite"})
+    check("non-int intervals rejected 200", r.status_code == 200)
+    check("non-int settings_imported=0", r.json()["settings_imported"] == 0)
+    r = client.get("/api/settings/review")
+    check("intervals still default after non-int", r.json()["intervals"] == [1, 3, 7, 14])
+
+    # Try too many intervals (>10)
+    bad3_backup = dict(bad_intervals_backup)
+    bad3_backup["app_settings"] = [{"key": "review_intervals", "value": "[1,2,3,4,5,6,7,8,9,10,11]"}]
+    r = client.post("/api/import/json", json=bad3_backup, params={"strategy": "overwrite"})
+    check("too many intervals rejected 200", r.status_code == 200)
+    check("too many settings_imported=0", r.json()["settings_imported"] == 0)
+
+    # Non-whitelisted key should be skipped
+    unknown_backup = dict(bad_intervals_backup)
+    unknown_backup["app_settings"] = [{"key": "unknown_setting", "value": "test"}]
+    r = client.post("/api/import/json", json=unknown_backup, params={"strategy": "overwrite"})
+    check("unknown key skipped 200", r.status_code == 200)
+    check("unknown key settings_imported=0", r.json()["settings_imported"] == 0)
+
+    # ── 60. Study sessions idempotent import ──
+    print("\n[60] Study sessions idempotent import")
+    # Use a unique marker to avoid collision with ZIP roundtrip test sessions
+    idempotent_marker = f"幂等测试-{int(time.time())}"
+    r = client.post("/api/sessions/start", json={"subject": idempotent_marker, "note": "导入验证"})
+    check("start idempotent session 200", r.status_code == 200)
+    idempotent_sess_id = r.json()["id"]
+    idempotent_started = r.json()["started_at"]
+    time.sleep(1)
+    r = client.post(f"/api/sessions/{idempotent_sess_id}/stop")
+    check("stop idempotent session 200", r.status_code == 200)
+    idempotent_ended = r.json()["ended_at"]
+    idempotent_duration = r.json()["duration_minutes"]
+
+    # Build a backup containing this session
+    session_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.3",
+        "materials": [], "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+        "app_settings": [],
+        "study_sessions": [
+            {
+                "id": 99999, "subject": idempotent_marker, "note": "导入验证",
+                "started_at": idempotent_started, "ended_at": idempotent_ended,
+                "duration_minutes": idempotent_duration,
+            },
+        ],
+    }
+
+    # The session was just created via API — import should detect it as duplicate (skip)
+    r = client.post("/api/import/json", json=session_backup, params={"strategy": "skip"})
+    check("session skip detects existing 200", r.status_code == 200)
+    check("session skip imported=0 (existing)", r.json()["sessions_imported"] == 0, f"got {r.json()['sessions_imported']}")
+    check("session skip skipped=1 (existing)", r.json()["sessions_skipped"] == 1, f"got {r.json()['sessions_skipped']}")
+
+    # Overwrite: should update the existing session
+    r = client.post("/api/import/json", json=session_backup, params={"strategy": "overwrite"})
+    check("session overwrite 200", r.status_code == 200)
+    check("session overwrite imported=1", r.json()["sessions_imported"] == 1, f"got {r.json()['sessions_imported']}")
+
+    # Second overwrite: should still update (idempotent)
+    r = client.post("/api/import/json", json=session_backup, params={"strategy": "overwrite"})
+    check("session overwrite2 200", r.status_code == 200)
+    check("session overwrite2 imported=1", r.json()["sessions_imported"] == 1, f"got {r.json()['sessions_imported']}")
+
+    # keep_both: should create a copy
+    r = client.post("/api/import/json", json=session_backup, params={"strategy": "keep_both"})
+    check("session keep_both 200", r.status_code == 200)
+    kb_count = r.json().get("kept_both", {}).get("study_sessions", 0)
+    check("session keep_both count=1", kb_count == 1, f"got {kb_count}")
+
+    # Repeated skip should always skip
+    r = client.post("/api/import/json", json=session_backup, params={"strategy": "skip"})
+    check("session repeated skip 200", r.status_code == 200)
+    check("session repeated skip imported=0", r.json()["sessions_imported"] == 0, f"got {r.json()['sessions_imported']}")
+
+    # Verify no unexpected duplicates
+    r = client.get("/api/sessions", params={"limit": 100})
+    idempotent_matches = [s for s in r.json() if s.get("subject") == idempotent_marker]
+    check("no unexpected duplicates", len(idempotent_matches) <= 2, f"found {len(idempotent_matches)}")  # original + keep_both copy
+
+    # ── 61. Preview shows app_settings and study_sessions ──
+    print("\n[61] Preview shows app_settings and study_sessions")
+    r = client.post("/api/import/preview", json=session_backup, params={"strategy": "skip"})
+    check("preview with sessions 200", r.status_code == 200)
+    pv = r.json()
+    check("preview has app_settings_count", "app_settings_count" in pv, f"keys={list(pv.keys())}")
+    check("preview has study_sessions_count", "study_sessions_count" in pv)
+    check("preview study_sessions_count=1", pv["study_sessions_count"] == 1, f"got {pv['study_sessions_count']}")
+    check("preview has modules.app_settings", "app_settings" in pv.get("modules", {}))
+    check("preview has modules.study_sessions", "study_sessions" in pv.get("modules", {}))
+    sess_mod = pv["modules"]["study_sessions"]
+    check("preview sess total=1", sess_mod["total"] == 1, f"got {sess_mod['total']}")
+    # Session already exists from test 60, so conflict should be detected
+    check("preview sess conflict detected", sess_mod["conflict_count"] >= 1, f"got {sess_mod['conflict_count']}")
+
+    # Preview with invalid settings
+    r = client.post("/api/import/preview", json=bad_intervals_backup, params={"strategy": "overwrite"})
+    check("preview bad settings 200", r.status_code == 200)
+    pv_bad = r.json()
+    check("preview settings_invalid > 0", pv_bad.get("settings_invalid", 0) > 0, f"got {pv_bad.get('settings_invalid')}")
+
+    # ── 62. ZIP import preview shows settings and sessions ──
+    print("\n[62] ZIP import preview shows settings and sessions")
+    # Export a ZIP that includes settings and sessions
+    r = client.put("/api/settings/review", json={"intervals": [2, 5, 10]})
+    check("set intervals for zip preview 200", r.status_code == 200)
+    r = client.get("/api/export/zip")
+    check("export zip for preview 200", r.status_code == 200)
+    zip_pv_bytes = r.content
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("reset intervals 200", r.status_code == 200)
+
+    # Preview the ZIP
+    r = client.post(
+        "/api/import/zip/preview",
+        files={"file": ("preview.zip", io.BytesIO(zip_pv_bytes), "application/zip")},
+        params={"strategy": "skip"},
+    )
+    check("zip preview with settings 200", r.status_code == 200)
+    zip_pv = r.json()
+    check("zip preview has app_settings_count", "app_settings_count" in zip_pv)
+    check("zip preview has study_sessions_count", "study_sessions_count" in zip_pv)
+    check("zip preview app_settings_count >= 1", zip_pv.get("app_settings_count", 0) >= 1,
+          f"got {zip_pv.get('app_settings_count')}")
+    check("zip preview has modules.app_settings", "app_settings" in zip_pv.get("modules", {}))
+    check("zip preview has modules.study_sessions", "study_sessions" in zip_pv.get("modules", {}))
+
+    # ── 63. Active session import force-ended ──
+    print("\n[63] Active session import force-ended")
+    active_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.3",
+        "materials": [], "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+        "app_settings": [],
+        "study_sessions": [
+            {
+                "subject": "活跃会话测试", "note": "无结束时间",
+                "started_at": "2026-06-05T10:00:00+00:00",
+                "ended_at": None, "duration_minutes": 0,
+            },
+        ],
+    }
+    r = client.post("/api/import/json", json=active_backup, params={"strategy": "skip"})
+    check("active session import 200", r.status_code == 200)
+    check("active session imported=1", r.json()["sessions_imported"] == 1, f"got {r.json()['sessions_imported']}")
+
+    # Verify the session was force-ended
+    r = client.get("/api/sessions", params={"limit": 100})
+    active_imported = [s for s in r.json() if s.get("subject") == "活跃会话测试"]
+    if active_imported:
+        check("active session has ended_at", active_imported[0]["ended_at"] is not None)
+        check("active session duration > 0", active_imported[0]["duration_minutes"] > 0,
+              f"got {active_imported[0]['duration_minutes']}")
+
+    # ── 64. Dashboard/trends not inflated by duplicate import ──
+    print("\n[64] Dashboard/trends not inflated by duplicate import")
+    # Get current study minutes
+    r = client.get("/api/dashboard/trends", params={"days": 7})
+    check("trends for inflation check 200", r.status_code == 200)
+    today_items = [x for x in r.json()["items"] if x["date"] == local_today()]
+    minutes_before = today_items[0]["study_minutes"] if today_items else 0
+
+    # Import the same session backup again (should be skipped as duplicate)
+    r = client.post("/api/import/json", json=session_backup, params={"strategy": "skip"})
+    check("inflation import 200", r.status_code == 200)
+    # All sessions in backup should be detected as duplicates
+    check("inflation session skipped or imported=0", r.json()["sessions_imported"] == 0,
+          f"imported={r.json()['sessions_imported']}, skipped={r.json()['sessions_skipped']}")
+
+    # Verify study minutes didn't inflate
+    r = client.get("/api/dashboard/trends", params={"days": 7})
+    today_items2 = [x for x in r.json()["items"] if x["date"] == local_today()]
+    minutes_after = today_items2[0]["study_minutes"] if today_items2 else 0
+    check("study minutes not inflated", minutes_after <= minutes_before + 1,
+          f"before={minutes_before}, after={minutes_after}")
+
+    # Cleanup sessions created by import tests (use DB directly)
+    async def _cleanup_import_sessions():
+        async with async_session() as session:
+            await session.execute(text(
+                "DELETE FROM study_sessions WHERE subject LIKE '幂等测试-%' OR subject = '活跃会话测试' OR note LIKE '导入验证%'"
+            ))
+            await session.commit()
+    loop_cs = asyncio.new_event_loop()
+    loop_cs.run_until_complete(_cleanup_import_sessions())
+    loop_cs.close()
+
+    # ── 65. Naive started_at + null ended_at active session import ──
+    print("\n[65] Naive started_at active session import")
+    naive_active_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.3",
+        "materials": [], "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+        "app_settings": [],
+        "study_sessions": [
+            {
+                "subject": "naive活跃测试", "note": "无时区无结束",
+                # Naive datetime — no timezone offset
+                "started_at": "2026-06-05T10:00:00",
+                "ended_at": None, "duration_minutes": 0,
+            },
+        ],
+    }
+    r = client.post("/api/import/json", json=naive_active_backup, params={"strategy": "skip"})
+    check("naive active import 200", r.status_code == 200)
+    check("naive active imported=1", r.json()["sessions_imported"] == 1, f"got {r.json()['sessions_imported']}")
+
+    # Verify force-ended
+    r = client.get("/api/sessions", params={"limit": 100})
+    naive_active = [s for s in r.json() if s.get("subject") == "naive活跃测试"]
+    if naive_active:
+        check("naive active has ended_at", naive_active[0]["ended_at"] is not None)
+        check("naive active duration > 0", naive_active[0]["duration_minutes"] > 0,
+              f"got {naive_active[0]['duration_minutes']}")
+
+    # Cleanup
+    async def _cleanup_naive():
+        async with async_session() as session:
+            await session.execute(text("DELETE FROM study_sessions WHERE subject = 'naive活跃测试'"))
+            await session.commit()
+    loop_cn = asyncio.new_event_loop()
+    loop_cn.run_until_complete(_cleanup_naive())
+    loop_cn.close()
+
+    # ── 66. Import [true, 2] does not pollute settings ──
+    print("\n[66] Import bool in review_intervals rejected")
+    r = client.put("/api/settings/review", json={"intervals": [1, 3, 7, 14]})
+    check("set default for bool test 200", r.status_code == 200)
+
+    bool_backup = {
+        "exported_at": "2026-01-01T00:00:00Z", "version": "0.3",
+        "materials": [], "material_chunks_count": 0,
+        "chat_history": [], "error_book": [], "study_plans": [],
+        "problems": [], "exam_questions": [], "exam_attempts": [],
+        "app_settings": [
+            {"key": "review_intervals", "value": "[true, 2]"},
+        ],
+        "study_sessions": [],
+    }
+    r = client.post("/api/import/json", json=bool_backup, params={"strategy": "overwrite"})
+    check("bool intervals import 200", r.status_code == 200)
+    check("bool intervals settings_imported=0", r.json()["settings_imported"] == 0, f"got {r.json()['settings_imported']}")
+    check("bool intervals settings_skipped>=1", r.json()["settings_skipped"] >= 1, f"got {r.json()['settings_skipped']}")
+    check("bool intervals has warnings", len(r.json().get("settings_warnings", [])) > 0)
+
+    # Verify intervals unchanged
+    r = client.get("/api/settings/review")
+    check("intervals still default after bool", r.json()["intervals"] == [1, 3, 7, 14], f"got {r.json()['intervals']}")
+
+    # Also test [false, 3]
+    bool_backup2 = dict(bool_backup)
+    bool_backup2["app_settings"] = [{"key": "review_intervals", "value": "[false, 3]"}]
+    r = client.post("/api/import/json", json=bool_backup2, params={"strategy": "overwrite"})
+    check("false intervals import 200", r.status_code == 200)
+    check("false intervals settings_imported=0", r.json()["settings_imported"] == 0)
+    r = client.get("/api/settings/review")
+    check("intervals still default after false", r.json()["intervals"] == [1, 3, 7, 14])
+
+    # ── 67. PUT [true, 2] returns 422 ──
+    print("\n[67] PUT bool in review_intervals returns 422")
+    r = client.put("/api/settings/review", json={"intervals": [True, 2]})
+    check("PUT [true,2] 422", r.status_code == 422, f"got {r.status_code}")
+
+    r = client.put("/api/settings/review", json={"intervals": [False, 3]})
+    check("PUT [false,3] 422", r.status_code == 422, f"got {r.status_code}")
+
+    # Verify still default
+    r = client.get("/api/settings/review")
+    check("intervals still default after PUT bool", r.json()["intervals"] == [1, 3, 7, 14])
+
+    # ── 68. ParseWorker race: delete material during parse ──
+    print("\n[68] ParseWorker race: delete material during parse")
+    # Upload a material, then immediately delete it while the worker might be processing
+    race_file = os.path.join(_tmp_dir, "worker_race_test.txt")
+    with open(race_file, "w", encoding="utf-8") as f:
+        f.write("Worker竞态测试内容 " * 100)
+    with open(race_file, "rb") as f:
+        r = client.post("/api/materials/upload", files={"file": ("worker_race_test.txt", f, "text/plain")})
+    check("race upload 200", r.status_code == 200)
+    race_mid = r.json()["id"]
+
+    # Immediately delete (race with worker)
+    r = client.delete(f"/api/materials/{race_mid}")
+    check("race delete 200", r.status_code == 200)
+
+    # Wait a bit for any in-flight worker tasks to complete
+    time.sleep(1)
+
+    # Verify health is still ok (no crash)
+    r = client.get("/api/health")
+    check("health ok after race", r.status_code == 200)
+    check("health status ok after race", r.json().get("status") == "ok")
+
+    # Verify no orphaned records
+    async def _verify_no_race_orphans():
+        async with async_session() as session:
+            mc = await session.execute(text("SELECT COUNT(*) FROM material_chunks WHERE material_id = :id"), {"id": race_mid})
+            mj = await session.execute(text("SELECT COUNT(*) FROM material_parse_jobs WHERE material_id = :id"), {"id": race_mid})
+            return mc.scalar() or 0, mj.scalar() or 0
+    loop_rr = asyncio.new_event_loop()
+    rc, rj = loop_rr.run_until_complete(_verify_no_race_orphans())
+    loop_rr.close()
+    check("no orphaned chunks after race", rc == 0, f"count={rc}")
+    check("no orphaned jobs after race", rj == 0, f"count={rj}")
+
+    # ── 69. Multiple rapid upload+delete race ──
+    print("\n[69] Multiple rapid upload+delete race")
+    race_ids = []
+    for i in range(3):
+        rf = os.path.join(_tmp_dir, f"rapid_race_{i}.txt")
+        with open(rf, "w", encoding="utf-8") as f:
+            f.write(f"快速竞态测试 {i} " + "x" * 200)
+        with open(rf, "rb") as f:
+            r = client.post("/api/materials/upload", files={"file": (f"rapid_race_{i}.txt", f, "text/plain")})
+        check(f"rapid race upload {i} 200", r.status_code == 200)
+        race_ids.append(r.json()["id"])
+
+    # Immediately delete all
+    for mid in race_ids:
+        r = client.delete(f"/api/materials/{mid}")
+        check(f"rapid race delete {mid} 200", r.status_code == 200)
+
+    # Wait for worker to finish any in-flight tasks
+    time.sleep(2)
+
+    # Verify health still ok
+    r = client.get("/api/health")
+    check("health ok after rapid race", r.status_code == 200)
+    check("health status ok after rapid race", r.json().get("status") == "ok")
 
 
 # ── Main ──

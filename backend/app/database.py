@@ -62,3 +62,14 @@ async def init_db():
             await conn.execute(text("ALTER TABLE material_parse_jobs ADD COLUMN progress_total INTEGER DEFAULT 0"))
         if "progress_message" not in columns:
             await conn.execute(text("ALTER TABLE material_parse_jobs ADD COLUMN progress_message VARCHAR(200) DEFAULT ''"))
+        # Create operation_logs table for backup/import/cleanup audit trail
+        await conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS operation_logs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "operation_type VARCHAR(30) NOT NULL,"
+            "file_type VARCHAR(10) DEFAULT '',"
+            "strategy VARCHAR(20) DEFAULT '',"
+            "result_summary TEXT DEFAULT '',"
+            "error_message TEXT DEFAULT '',"
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        ))

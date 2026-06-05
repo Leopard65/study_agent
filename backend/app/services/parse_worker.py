@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.database import async_session
 from app.models import Material, MaterialParseJob
@@ -92,7 +93,12 @@ class ParseWorker:
             await self._queue.put(material_id)
         else:
             # worker 未启动时直接创建任务（兼容测试场景）
-            asyncio.create_task(self._process_one(material_id))
+            async def _safe_process():
+                try:
+                    await self._process_one(material_id)
+                except Exception:
+                    logger.exception("Unexpected error in enqueue for material %d", material_id)
+            asyncio.create_task(_safe_process())
 
     async def _consume_loop(self) -> None:
         """持续从队列取任务并处理（受并发限制）。"""
@@ -107,8 +113,12 @@ class ParseWorker:
             asyncio.create_task(self._semaphore_wrap(material_id))
 
     async def _semaphore_wrap(self, material_id: int) -> None:
-        async with self._semaphore:
-            await self._process_one(material_id)
+        try:
+            async with self._semaphore:
+                await self._process_one(material_id)
+        except Exception:
+            # Never let exceptions leak from fire-and-forget tasks
+            logger.exception("Unexpected error in _semaphore_wrap for material %d", material_id)
 
     async def _update_progress(self, job_id: int, current: int, total: int, message: str) -> None:
         """更新 job 的进度字段（轻量，不改 status）。"""
@@ -127,39 +137,45 @@ class ParseWorker:
     async def _process_one(self, material_id: int) -> None:
         """处理单个 material 的解析任务。"""
         # 查找 pending job
-        async with async_session() as session:
-            job = (
-                await session.execute(
-                    select(MaterialParseJob)
-                    .where(
-                        MaterialParseJob.material_id == material_id,
-                        MaterialParseJob.status == "pending",
+        try:
+            async with async_session() as session:
+                job = (
+                    await session.execute(
+                        select(MaterialParseJob)
+                        .where(
+                            MaterialParseJob.material_id == material_id,
+                            MaterialParseJob.status == "pending",
+                        )
+                        .order_by(MaterialParseJob.created_at.desc())
+                        .limit(1)
                     )
-                    .order_by(MaterialParseJob.created_at.desc())
-                    .limit(1)
-                )
-            ).scalars().first()
-            if not job:
-                return
-            job.status = "processing"
-            job.started_at = _utcnow()
-            job.attempts += 1
-            job.progress_current = 0
-            job.progress_total = 4  # 4 阶段：读取→提取→索引→完成
-            job.progress_message = "等待中"
-            material = await session.get(Material, material_id)
-            if not material:
-                job.status = "failed"
-                job.error_message = "资料记录不存在"
-                job.progress_message = "失败：资料记录不存在"
-                job.finished_at = _utcnow()
+                ).scalars().first()
+                if not job:
+                    return
+                job_id_local = job.id
+                job.status = "processing"
+                job.started_at = _utcnow()
+                job.attempts += 1
+                job.progress_current = 0
+                job.progress_total = 4  # 4 阶段：读取→提取→索引→完成
+                job.progress_message = "等待中"
+                material = await session.get(Material, material_id)
+                if not material:
+                    job.status = "failed"
+                    job.error_message = "资料记录不存在"
+                    job.progress_message = "失败：资料记录不存在"
+                    job.finished_at = _utcnow()
+                    await session.commit()
+                    return
+                material.status = "processing"
+                file_path = material.stored_filename or ""
                 await session.commit()
-                return
-            material.status = "processing"
-            file_path = material.stored_filename or ""
-            await session.commit()
+        except (StaleDataError, IntegrityError, InvalidRequestError):
+            # Job or material was deleted between query and commit (race with user delete/cleanup)
+            logger.info("Material %d or job disappeared before commit, skipping", material_id)
+            return
 
-        job_id = job.id
+        job_id = job_id_local
 
         # 构建完整文件路径
         from app.config import get_settings
@@ -206,7 +222,7 @@ class ParseWorker:
                 await session.commit()
                 logger.info("Material %d parsed (%d chars, attempt %d)", material_id, len(text_content), job.attempts if job else -1)
 
-        except (IntegrityError, InvalidRequestError):
+        except (IntegrityError, InvalidRequestError, StaleDataError):
             # Material/job was deleted during parse (user action) — quiet exit
             logger.info("Material %d or its parse job deleted during parse, skipping", material_id)
         except Exception as e:
@@ -228,7 +244,7 @@ class ParseWorker:
                         job.progress_message = f"失败：{str(e)[:100]}"
                         job.finished_at = _utcnow()
                     await session.commit()
-            except (IntegrityError, InvalidRequestError):
+            except (IntegrityError, InvalidRequestError, StaleDataError):
                 logger.info("Material %d deleted during parse error handling, skipping", material_id)
                 return
             logger.exception("Failed to parse material %d", material_id)
