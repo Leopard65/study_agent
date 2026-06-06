@@ -135,6 +135,10 @@ powershell -ExecutionPolicy Bypass -File scripts\start-app-windows.ps1
 
 > 与开发模式的区别：只有一个 Python 进程，前端静态文件由 FastAPI 直接托管。适合日常使用或部署到内网。
 >
+> - 首次运行会自动创建 `.venv` 并安装后端依赖（同开发启动脚本逻辑）。
+> - `frontend/dist` 不存在时会自动 `npm run build`。
+> - `/api/*` 路由不被前端 fallback 吃掉：未匹配的 API 路径返回 404 JSON，而非 `index.html`。
+>
 > 支持参数：`-NoOpenBrowser`、`-AutoStopAfterSeconds N`。
 
 ### 开始使用
@@ -377,7 +381,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 -NoOpenBrowse
 powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
 ```
 
-截至当前版本，后端冒烟测试 **1071 passed, 0 failed**，前端 E2E 测试 **20 passed**。
+截至当前版本，后端冒烟测试 **1080 passed, 0 failed**，前端 E2E 测试 **21 passed**。
 
 ## License
 

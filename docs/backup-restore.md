@@ -167,11 +167,12 @@ Tesseract OCR 语言包不包含在导出中。新电脑需要：
 
 导入学习会话（study_sessions）时，系统会进行严格的数据校验：
 
-- **duration_minutes**：必须为非负整数。`true`/`false`、浮点数、字符串、负数等均会被拒绝或重算。`0` 会按实际时长重算。超过实际时长的值会被截断。
+- **duration_minutes**：只接受 plain int ≥ 0。`true`/`false`、浮点数、字符串（含 `"60"`）、负数、`None`/缺失 → 均按实际时长（ended_at − started_at）重算并返回 warning。`0` 也按实际时长重算。超过实际时长的 int 会被截断。
 - **started_at**：缺失或无法解析 → 跳过，计入 `sessions_invalid`。
 - **ended_at < started_at** → 跳过，计入 `sessions_invalid`。
 - **活跃会话**（ended_at 为空）→ 导入时强制结束（以当前时间作为 ended_at）。如果 started_at 在未来导致 ended_at < started_at，也跳过。
-- **subject / note**：非字符串转为空字符串，超长截断。
+- **subject**：非字符串转为空字符串，超长截断（上限 100 字符，与创建接口一致）。
+- **note**：非字符串转为空字符串，超长截断（上限 500 字符，与创建接口一致）。
 - **重复检测**：相同 started_at + subject + note 视为重复。
 
 导入结果中区分：

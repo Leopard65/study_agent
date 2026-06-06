@@ -150,7 +150,7 @@ async def _import_app_settings(db: AsyncSession, data: dict, strategy: str) -> t
 
 
 _SESSION_SUBJECT_MAX = 100
-_SESSION_NOTE_MAX = 5000
+_SESSION_NOTE_MAX = 500
 
 
 async def _import_study_sessions(
@@ -165,10 +165,10 @@ async def _import_study_sessions(
     - ended_at < started_at: → invalid.
     - Active session (ended_at=None): force-end at now_utc. If started_at is
       in the future (so ended_at < started_at after force-end), → invalid.
-    - duration_minutes: must be a plain int >= 0. Reject bool, float, str,
-      negative, None/missing. If int exceeds actual elapsed minutes, cap and
-      warn.
-    - subject / note: non-string → coerce to "". Truncate if over limit.
+    - duration_minutes: only accept plain int >= 0. bool, float, str,
+      negative, None/missing → recalculate from timestamps and warn.
+      If int exceeds actual elapsed minutes, cap and warn.
+    - subject / note: non-string → coerce to "". Truncate at 100/500.
     - Duplicate detection: same started_at + subject + note.
     """
     imported = 0
@@ -188,9 +188,11 @@ async def _import_study_sessions(
 
         # ── ended_at + active session handling ──
         ended_dt = _parse_backup_datetime(s.get("ended_at"))
+        force_ended = False
         if ended_dt is None:
             # Active session → force-end at import time
             ended_dt = now_utc
+            force_ended = True
             # If started_at is in the future, ended_at < started_at → invalid
             if ended_dt < started_dt:
                 invalid += 1
@@ -203,55 +205,38 @@ async def _import_study_sessions(
             warnings.append(f"会话#{idx + 1}: ended_at 早于 started_at，已跳过")
             continue
 
-        # ── duration_minutes: strict int validation ──
+        # ── duration_minutes: only accept plain int >= 0 ──
         raw_dur = s.get("duration_minutes")
-        if raw_dur is None or isinstance(raw_dur, bool) or (isinstance(raw_dur, int) and raw_dur == 0):
-            # None, bool, or zero → recalculate from timestamps
-            delta = ended_dt - started_dt
-            duration = max(0, int(delta.total_seconds() // 60))
-        elif isinstance(raw_dur, int) and not isinstance(raw_dur, bool):
+        delta = ended_dt - started_dt
+        actual_minutes = max(0, int(delta.total_seconds() // 60))
+        if force_ended:
+            # Active session was force-ended — always recalculate
+            duration = actual_minutes
+        elif raw_dur is None:
+            duration = actual_minutes
+        elif isinstance(raw_dur, bool):
+            warnings.append(f"会话#{idx + 1}: duration_minutes 为布尔值，已按实际时长重算")
+            duration = actual_minutes
+        elif isinstance(raw_dur, int):
             if raw_dur < 0:
-                warnings.append(f"会话#{idx + 1}: duration_minutes 为负数({raw_dur})，已重算")
-                delta = ended_dt - started_dt
-                duration = max(0, int(delta.total_seconds() // 60))
+                warnings.append(f"会话#{idx + 1}: duration_minutes 为负数({raw_dur})，已按实际时长重算")
+                duration = actual_minutes
+            elif raw_dur > actual_minutes + 1:
+                warnings.append(
+                    f"会话#{idx + 1}: duration_minutes={raw_dur} 超过实际时长{actual_minutes}分钟，已截断"
+                )
+                duration = actual_minutes
             else:
-                # Cap to actual elapsed minutes if inflated
-                delta = ended_dt - started_dt
-                actual_minutes = max(0, int(delta.total_seconds() // 60))
-                if raw_dur > actual_minutes + 1:  # +1 tolerance for rounding
-                    warnings.append(
-                        f"会话#{idx + 1}: duration_minutes={raw_dur} 超过实际时长{actual_minutes}分钟，已截断"
-                    )
-                    duration = actual_minutes
-                else:
-                    duration = raw_dur
+                duration = raw_dur
         elif isinstance(raw_dur, float):
-            # Float → recalculate, warn
-            warnings.append(f"会话#{idx + 1}: duration_minutes 为浮点数({raw_dur})，已重算")
-            delta = ended_dt - started_dt
-            duration = max(0, int(delta.total_seconds() // 60))
+            warnings.append(f"会话#{idx + 1}: duration_minutes 为浮点数({raw_dur})，已按实际时长重算")
+            duration = actual_minutes
         elif isinstance(raw_dur, str):
-            # String → try parse, otherwise recalculate
-            try:
-                parsed = int(raw_dur)
-                if parsed < 0:
-                    raise ValueError
-                delta = ended_dt - started_dt
-                actual_minutes = max(0, int(delta.total_seconds() // 60))
-                if parsed > actual_minutes + 1:
-                    warnings.append(
-                        f"会话#{idx + 1}: duration_minutes={parsed} 超过实际时长{actual_minutes}分钟，已截断"
-                    )
-                    duration = actual_minutes
-                else:
-                    duration = parsed
-            except (ValueError, TypeError):
-                warnings.append(f"会话#{idx + 1}: duration_minutes='{raw_dur}' 无法解析，已重算")
-                delta = ended_dt - started_dt
-                duration = max(0, int(delta.total_seconds() // 60))
+            warnings.append(f"会话#{idx + 1}: duration_minutes 为字符串('{raw_dur}')，已按实际时长重算")
+            duration = actual_minutes
         else:
-            delta = ended_dt - started_dt
-            duration = max(0, int(delta.total_seconds() // 60))
+            warnings.append(f"会话#{idx + 1}: duration_minutes 类型无效({type(raw_dur).__name__})，已按实际时长重算")
+            duration = actual_minutes
 
         # ── subject / note: type coercion + truncation ──
         raw_subject = s.get("subject", "")

@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from sqlalchemy import text
@@ -120,8 +120,10 @@ if _DIST_DIR.is_dir():
     @app.get("/{full_path:path}")
     async def serve_frontend(request: Request, full_path: str):
         """Serve frontend files. Non-/api routes fall back to index.html for SPA routing."""
-        # API routes are handled by routers above — this catch-all only runs
-        # for paths that didn't match any API route.
+        # /api/* that didn't match any registered route → 404 JSON, not HTML
+        if full_path.startswith("api/"):
+            return JSONResponse(status_code=404, content={"detail": f"未找到 API 端点: /{full_path}"})
+        # Serve static file if it exists
         file_path = _DIST_DIR / full_path
         if file_path.is_file():
             return FileResponse(str(file_path))

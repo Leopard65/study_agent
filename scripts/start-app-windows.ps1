@@ -105,7 +105,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # ── 检查 Python ──
-Write-Host "[1/4] 检查 Python..." -ForegroundColor Yellow
+Write-Host "[1/5] 检查 Python..." -ForegroundColor Yellow
 try {
     $pyVer = python --version 2>&1
     if ($pyVer -match "Python (\d+)\.(\d+)") {
@@ -122,8 +122,44 @@ try {
     exit 1
 }
 
+# ── 创建 .venv 并安装后端依赖 ──
+Write-Host "[2/5] 安装后端依赖..." -ForegroundColor Yellow
+$backendDir = Join-Path $ProjectRoot "backend"
+$venvDir = Join-Path $backendDir ".venv"
+
+if (-not (Test-Path (Join-Path $venvDir "Scripts\python.exe"))) {
+    Write-Host "  创建虚拟环境..." -ForegroundColor Gray
+    & python -m venv $venvDir
+}
+
+$pipExe = Join-Path $venvDir "Scripts\pip.exe"
+$pyExe = Join-Path $venvDir "Scripts\python.exe"
+
+# 检查是否需要安装（venv 刚创建或 requirements 更改）
+$reqFile = Join-Path $backendDir "requirements.txt"
+$markerFile = Join-Path $venvDir ".deps_installed"
+$needInstall = $true
+if (Test-Path $markerFile) {
+    $installedTime = (Get-Item $markerFile).LastWriteTime
+    $reqTime = (Get-Item $reqFile).LastWriteTime
+    if ($reqTime -le $installedTime) {
+        $needInstall = $false
+    }
+}
+
+if ($needInstall) {
+    Write-Host "  pip install（首次可能较慢）..." -ForegroundColor Gray
+    & $pipExe install -r $reqFile --quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  错误：pip install 失败" -ForegroundColor Red
+        exit 1
+    }
+    New-Item -ItemType File -Path $markerFile -Force | Out-Null
+}
+Write-Host "  后端依赖 OK" -ForegroundColor Green
+
 # ── 检查 frontend/dist ──
-Write-Host "[2/4] 检查前端构建..." -ForegroundColor Yellow
+Write-Host "[3/5] 检查前端构建..." -ForegroundColor Yellow
 $distDir = Join-Path $ProjectRoot "frontend\dist"
 if (-not (Test-Path (Join-Path $distDir "index.html"))) {
     Write-Host "  frontend/dist/index.html 不存在，尝试构建..." -ForegroundColor Gray
@@ -148,9 +184,7 @@ if (-not (Test-Path (Join-Path $distDir "index.html"))) {
 }
 
 # ── 创建 .env 并检查 API Key ──
-Write-Host "[3/4] 检查配置文件..." -ForegroundColor Yellow
-$backendDir = Join-Path $ProjectRoot "backend"
-$venvDir = Join-Path $backendDir ".venv"
+Write-Host "[4/5] 检查配置文件..." -ForegroundColor Yellow
 $envFile = Join-Path $backendDir ".env"
 $envExample = Join-Path $backendDir ".env.example"
 $apiKeyConfigured = $false
@@ -188,8 +222,7 @@ if (-not $apiKeyConfigured) {
 }
 
 # ── 端口检查 ──
-Write-Host "[4/4] 启动服务..." -ForegroundColor Yellow
-$pyExe = Join-Path $venvDir "Scripts\python.exe"
+Write-Host "[5/5] 启动服务..." -ForegroundColor Yellow
 
 function Test-PortInUse {
     param([int]$Port)
