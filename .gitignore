@@ -1,19 +1,20 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-android/
-ios/
+# Gradle
+.gradle/
+build/
+!**/src/**/build/
+local.properties
 
 # IDE
 .idea/
+*.iml
 *.swp
 *.swo
 
-# Environment
-.env
-.env.local
+# Android
+*.apk
+*.aab
+*.dex
+*.class
 
 # OS
 .DS_Store
@@ -25,5 +26,6 @@ Thumbs.db
 # Claude local config
 .claude/
 
-# Test output
-test-results/
+# Secrets
+*.jks
+*.keystore
