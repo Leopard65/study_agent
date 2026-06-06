@@ -149,39 +149,134 @@ async def _import_app_settings(db: AsyncSession, data: dict, strategy: str) -> t
     return imported, skipped, warnings
 
 
-async def _import_study_sessions(db: AsyncSession, data: dict, strategy: str) -> tuple[int, int, int]:
-    """Import study_sessions from backup. Returns (imported, skipped, kept_both_count).
+_SESSION_SUBJECT_MAX = 100
+_SESSION_NOTE_MAX = 5000
 
-    Duplicate detection: same started_at + subject + note.
-    Active sessions (no ended_at) are force-ended at import time.
-    All datetimes are normalized to UTC-aware for consistent comparison.
+
+async def _import_study_sessions(
+    db: AsyncSession, data: dict, strategy: str
+) -> tuple[int, int, int, int, list[str]]:
+    """Import study_sessions from backup.
+
+    Returns (imported, skipped, invalid, kept_both_count, warnings).
+
+    Validation rules:
+    - started_at: required, must parse to a datetime. Otherwise → invalid.
+    - ended_at < started_at: → invalid.
+    - Active session (ended_at=None): force-end at now_utc. If started_at is
+      in the future (so ended_at < started_at after force-end), → invalid.
+    - duration_minutes: must be a plain int >= 0. Reject bool, float, str,
+      negative, None/missing. If int exceeds actual elapsed minutes, cap and
+      warn.
+    - subject / note: non-string → coerce to "". Truncate if over limit.
+    - Duplicate detection: same started_at + subject + note.
     """
     imported = 0
     skipped = 0
+    invalid = 0
     kept_both_count = 0
+    warnings: list[str] = []
     now_utc = _normalize_utc(_dt_mod.now(_tz.utc))
-    for s in data.get("study_sessions", []):
+
+    for idx, s in enumerate(data.get("study_sessions", [])):
+        # ── started_at ──
         started_dt = _parse_backup_datetime(s.get("started_at"))
         if started_dt is None:
-            skipped += 1
+            invalid += 1
+            warnings.append(f"会话#{idx + 1}: started_at 缺失或无法解析，已跳过")
             continue
-        ended_dt = _parse_backup_datetime(s.get("ended_at"))
 
-        # Active session (no ended_at) → force-end at import time
+        # ── ended_at + active session handling ──
+        ended_dt = _parse_backup_datetime(s.get("ended_at"))
         if ended_dt is None:
+            # Active session → force-end at import time
             ended_dt = now_utc
-            # Recalculate duration if original was 0
-            duration = s.get("duration_minutes", 0) or 0
-            if duration == 0:
+            # If started_at is in the future, ended_at < started_at → invalid
+            if ended_dt < started_dt:
+                invalid += 1
+                warnings.append(f"会话#{idx + 1}: 活跃会话的 started_at 在未来，已跳过")
+                continue
+
+        # ended_at < started_at check (for non-active sessions)
+        if ended_dt < started_dt:
+            invalid += 1
+            warnings.append(f"会话#{idx + 1}: ended_at 早于 started_at，已跳过")
+            continue
+
+        # ── duration_minutes: strict int validation ──
+        raw_dur = s.get("duration_minutes")
+        if raw_dur is None or isinstance(raw_dur, bool) or (isinstance(raw_dur, int) and raw_dur == 0):
+            # None, bool, or zero → recalculate from timestamps
+            delta = ended_dt - started_dt
+            duration = max(0, int(delta.total_seconds() // 60))
+        elif isinstance(raw_dur, int) and not isinstance(raw_dur, bool):
+            if raw_dur < 0:
+                warnings.append(f"会话#{idx + 1}: duration_minutes 为负数({raw_dur})，已重算")
+                delta = ended_dt - started_dt
+                duration = max(0, int(delta.total_seconds() // 60))
+            else:
+                # Cap to actual elapsed minutes if inflated
+                delta = ended_dt - started_dt
+                actual_minutes = max(0, int(delta.total_seconds() // 60))
+                if raw_dur > actual_minutes + 1:  # +1 tolerance for rounding
+                    warnings.append(
+                        f"会话#{idx + 1}: duration_minutes={raw_dur} 超过实际时长{actual_minutes}分钟，已截断"
+                    )
+                    duration = actual_minutes
+                else:
+                    duration = raw_dur
+        elif isinstance(raw_dur, float):
+            # Float → recalculate, warn
+            warnings.append(f"会话#{idx + 1}: duration_minutes 为浮点数({raw_dur})，已重算")
+            delta = ended_dt - started_dt
+            duration = max(0, int(delta.total_seconds() // 60))
+        elif isinstance(raw_dur, str):
+            # String → try parse, otherwise recalculate
+            try:
+                parsed = int(raw_dur)
+                if parsed < 0:
+                    raise ValueError
+                delta = ended_dt - started_dt
+                actual_minutes = max(0, int(delta.total_seconds() // 60))
+                if parsed > actual_minutes + 1:
+                    warnings.append(
+                        f"会话#{idx + 1}: duration_minutes={parsed} 超过实际时长{actual_minutes}分钟，已截断"
+                    )
+                    duration = actual_minutes
+                else:
+                    duration = parsed
+            except (ValueError, TypeError):
+                warnings.append(f"会话#{idx + 1}: duration_minutes='{raw_dur}' 无法解析，已重算")
                 delta = ended_dt - started_dt
                 duration = max(0, int(delta.total_seconds() // 60))
         else:
-            duration = s.get("duration_minutes", 0) or 0
+            delta = ended_dt - started_dt
+            duration = max(0, int(delta.total_seconds() // 60))
 
-        subject = s.get("subject", "")
-        note = s.get("note", "")
+        # ── subject / note: type coercion + truncation ──
+        raw_subject = s.get("subject", "")
+        if isinstance(raw_subject, str):
+            subject = raw_subject
+        else:
+            subject = ""
+            warnings.append(f"会话#{idx + 1}: subject 非字符串，已转为空")
 
-        # Duplicate detection: match on started_at + subject + note
+        if len(subject) > _SESSION_SUBJECT_MAX:
+            warnings.append(f"会话#{idx + 1}: subject 超长({len(subject)}字符)，已截断到{_SESSION_SUBJECT_MAX}")
+            subject = subject[:_SESSION_SUBJECT_MAX]
+
+        raw_note = s.get("note", "")
+        if isinstance(raw_note, str):
+            note = raw_note
+        else:
+            note = ""
+            warnings.append(f"会话#{idx + 1}: note 非字符串，已转为空")
+
+        if len(note) > _SESSION_NOTE_MAX:
+            warnings.append(f"会话#{idx + 1}: note 超长({len(note)}字符)，已截断到{_SESSION_NOTE_MAX}")
+            note = note[:_SESSION_NOTE_MAX]
+
+        # ── Duplicate detection: match on started_at + subject + note ──
         dup = await db.execute(
             select(StudySession.id).where(
                 StudySession.started_at == started_dt,
@@ -220,7 +315,7 @@ async def _import_study_sessions(db: AsyncSession, data: dict, strategy: str) ->
             db.add(rec)
             imported += 1
 
-    return imported, skipped, kept_both_count
+    return imported, skipped, invalid, kept_both_count, warnings
 
 
 @router.post("/preview")
@@ -388,17 +483,33 @@ async def import_preview(
     }
     total_conflicts += settings_conflict
 
-    # ── Study sessions preview (duplicate detection) ──
+    # ── Study sessions preview (with validation) ──
     sess_total = 0
     sess_new = 0
     sess_conflict = 0
+    sess_invalid = 0
+    now_utc = _normalize_utc(_dt_mod.now(_tz.utc))
     for s in data.get("study_sessions", []):
         started_dt = _parse_backup_datetime(s.get("started_at"))
         if started_dt is None:
+            sess_invalid += 1
             continue
+        ended_dt = _parse_backup_datetime(s.get("ended_at"))
+        if ended_dt is None:
+            ended_dt = now_utc
+            if ended_dt < started_dt:
+                sess_invalid += 1
+                continue
+        if ended_dt < started_dt:
+            sess_invalid += 1
+            continue
+        # Validate duration_minutes type
+        raw_dur = s.get("duration_minutes")
+        if raw_dur is not None and not isinstance(raw_dur, int) and not isinstance(raw_dur, (type(None),)):
+            pass  # allow through preview, will be corrected on import
         sess_total += 1
-        subject = s.get("subject", "")
-        note = s.get("note", "")
+        subject = s.get("subject", "") if isinstance(s.get("subject"), str) else ""
+        note = s.get("note", "") if isinstance(s.get("note"), str) else ""
         dup = await db.execute(
             select(StudySession.id).where(
                 StudySession.started_at == started_dt,
@@ -433,6 +544,7 @@ async def import_preview(
         "modules": stats,
         "conflict_samples": conflict_samples,
         "settings_invalid": settings_invalid,
+        "sessions_invalid": sess_invalid,
         # Backward compat: keep old flat fields
         "materials_count": stats["materials"]["total"],
         "error_book_count": stats["error_book"]["total"],
@@ -681,7 +793,7 @@ async def import_json(
     settings_imported, settings_skipped, settings_warnings = await _import_app_settings(db, data, strategy)
 
     # ── Study sessions — v0.3+ optional, idempotent ──
-    sessions_imported, sessions_skipped, sessions_kept_both = await _import_study_sessions(db, data, strategy)
+    sessions_imported, sessions_skipped, sessions_invalid, sessions_kept_both, sessions_warnings = await _import_study_sessions(db, data, strategy)
     # Merge sessions_kept_both into kept_both counter
     kept_both["study_sessions"] = sessions_kept_both
 
@@ -696,9 +808,12 @@ async def import_json(
         "settings_skipped": settings_skipped,
         "sessions_imported": sessions_imported,
         "sessions_skipped": sessions_skipped,
+        "sessions_invalid": sessions_invalid,
     }
     if settings_warnings:
         result["settings_warnings"] = settings_warnings
+    if sessions_warnings:
+        result["sessions_warnings"] = sessions_warnings
 
     # Log the operation
     log_summary = {k: {m: v for m, v in counts.items() if v > 0} for k, counts in result.items() if isinstance(counts, dict)}
@@ -1192,7 +1307,7 @@ async def import_zip(
     settings_imported, settings_skipped, settings_warnings = await _import_app_settings(db, data, strategy)
 
     # ── Study sessions — v0.3+ optional, idempotent ──
-    sessions_imported, sessions_skipped, sessions_kept_both = await _import_study_sessions(db, data, strategy)
+    sessions_imported, sessions_skipped, sessions_invalid, sessions_kept_both, sessions_warnings = await _import_study_sessions(db, data, strategy)
     kept_both["study_sessions"] = sessions_kept_both
 
     await db.commit()
@@ -1217,9 +1332,12 @@ async def import_zip(
         "settings_skipped": settings_skipped,
         "sessions_imported": sessions_imported,
         "sessions_skipped": sessions_skipped,
+        "sessions_invalid": sessions_invalid,
     }
     if settings_warnings:
         result["settings_warnings"] = settings_warnings
+    if sessions_warnings:
+        result["sessions_warnings"] = sessions_warnings
 
     # Log the operation
     log_summary = {k: {m: v for m, v in counts.items() if v > 0} for k, counts in

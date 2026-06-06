@@ -17,7 +17,7 @@ from app.models import (
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 # Application display version (shown in Sidebar, FastAPI metadata)
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 # Backup JSON schema version — used by import for compatibility checks.
 # Do NOT change unless the backup format is intentionally changed;
 # existing backups rely on this string for import validation.

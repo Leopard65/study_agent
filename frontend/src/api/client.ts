@@ -381,6 +381,7 @@ export interface ImportPreview {
   modules: Record<string, ImportModuleStats>;
   conflict_samples: Record<string, string[]>;
   settings_invalid?: number;
+  sessions_invalid?: number;
   // Backward compat flat fields
   materials_count: number;
   error_book_count: number;
@@ -403,6 +404,8 @@ export interface ImportResult {
   settings_warnings?: string[];
   sessions_imported?: number;
   sessions_skipped?: number;
+  sessions_invalid?: number;
+  sessions_warnings?: string[];
 }
 
 export const importPreview = (data: Record<string, unknown>, strategy = 'skip'): Promise<ImportPreview> =>

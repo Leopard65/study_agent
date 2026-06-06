@@ -636,9 +636,10 @@ test.describe('data maintenance', () => {
     await page.getByRole('button', { name: '预览清理' }).click();
 
     // Preview results should appear
-    await expect(page.getByText('清理预览：')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/孤儿文件.*个/)).toBeVisible();
-    await expect(page.getByText(/无效解析任务.*个/)).toBeVisible();
+    const preview = page.getByTestId('cleanup-preview');
+    await expect(preview).toBeVisible({ timeout: 10_000 });
+    await expect(preview.getByText(/孤儿文件.*个/)).toBeVisible();
+    await expect(preview.getByText(/无效解析任务.*个/)).toBeVisible();
   });
 
   test('operation logs load and display entries', async ({ page }) => {

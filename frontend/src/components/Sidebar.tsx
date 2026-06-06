@@ -364,7 +364,7 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
 
         {!sidebarCollapsed && (
           <>
-            <div className="text-gray-500 mt-2">MVP v0.6</div>
+            <div className="text-gray-500 mt-2">MVP v0.7</div>
             <div className={`mt-1 ${statusColor}`}>{statusText}</div>
           </>
         )}
@@ -428,6 +428,9 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
             <div>解析: {preview.problems_count} / 设置: {preview.app_settings_count ?? 0} / 会话: {preview.study_sessions_count ?? 0}</div>
             {(preview.settings_invalid ?? 0) > 0 && (
               <div className="text-yellow-400">{preview.settings_invalid} 项设置数据无效，将跳过</div>
+            )}
+            {(preview.sessions_invalid ?? 0) > 0 && (
+              <div className="text-yellow-400">{preview.sessions_invalid} 条会话数据无效，将跳过</div>
             )}
 
             {/* Conflict summary */}
@@ -536,6 +539,10 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
             {(importResult.settings_imported ?? 0) > 0 && <div>设置恢复: {importResult.settings_imported} 项</div>}
             {(importResult.sessions_imported ?? 0) > 0 && <div>学习会话: 导入 {importResult.sessions_imported} 条</div>}
             {(importResult.sessions_skipped ?? 0) > 0 && <div className="text-gray-400">会话跳过: {importResult.sessions_skipped} 条（重复）</div>}
+            {(importResult.sessions_invalid ?? 0) > 0 && <div className="text-yellow-400">会话无效: {importResult.sessions_invalid} 条（已跳过）</div>}
+            {(importResult.sessions_warnings ?? []).length > 0 && (
+              <div className="text-yellow-400">会话警告: {importResult.sessions_warnings!.slice(0, 3).join('; ')}{importResult.sessions_warnings!.length > 3 ? '...' : ''}</div>
+            )}
             {(importResult.settings_warnings ?? []).length > 0 && (
               <div className="text-yellow-400">设置警告: {importResult.settings_warnings!.join('; ')}</div>
             )}
@@ -559,6 +566,9 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
             <div>解析: {zipPreview.problems_count} / 设置: {zipPreview.app_settings_count ?? 0} / 会话: {zipPreview.study_sessions_count ?? 0}</div>
             {(zipPreview.settings_invalid ?? 0) > 0 && (
               <div className="text-yellow-400">{zipPreview.settings_invalid} 项设置数据无效，将跳过</div>
+            )}
+            {(zipPreview.sessions_invalid ?? 0) > 0 && (
+              <div className="text-yellow-400">{zipPreview.sessions_invalid} 条会话数据无效，将跳过</div>
             )}
             {zipPreview.zip_info && (
               <div className="text-blue-300">
@@ -655,6 +665,10 @@ export default function Sidebar({ onOpenPalette, mobileOpen, onMobileClose }: Si
             {(zipImportResult.settings_imported ?? 0) > 0 && <div>设置恢复: {zipImportResult.settings_imported} 项</div>}
             {(zipImportResult.sessions_imported ?? 0) > 0 && <div>学习会话: 导入 {zipImportResult.sessions_imported} 条</div>}
             {(zipImportResult.sessions_skipped ?? 0) > 0 && <div className="text-gray-400">会话跳过: {zipImportResult.sessions_skipped} 条（重复）</div>}
+            {(zipImportResult.sessions_invalid ?? 0) > 0 && <div className="text-yellow-400">会话无效: {zipImportResult.sessions_invalid} 条（已跳过）</div>}
+            {(zipImportResult.sessions_warnings ?? []).length > 0 && (
+              <div className="text-yellow-400">会话警告: {zipImportResult.sessions_warnings!.slice(0, 3).join('; ')}{zipImportResult.sessions_warnings!.length > 3 ? '...' : ''}</div>
+            )}
             {(zipImportResult.settings_warnings ?? []).length > 0 && (
               <div className="text-yellow-400">设置警告: {zipImportResult.settings_warnings!.join('; ')}</div>
             )}

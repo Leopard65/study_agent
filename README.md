@@ -1,6 +1,6 @@
 # 考研长期陪跑学习助手
 
-> **当前版本：MVP v0.6** — 单用户个人学习工具，可本地运行或自托管。数据全部保存在你的电脑上，不上传到任何服务器。
+> **当前版本：MVP v0.7** — Web 端本地单用户学习工具，数据全部保存在你的电脑上，不上传到任何服务器。安卓端在独立仓库开发。
 
 基于 AI 问答 + 资料库 RAG 的考研学习辅助工具，支持数学公式 LaTeX 渲染。覆盖「资料上传 → AI 问答/题目解析 → 加入错题本 → 今日复习 → 学习计划/工作台」的完整学习闭环。
 
@@ -118,6 +118,24 @@ npm run dev
 ```
 
 浏览器打开 **http://localhost:5173**
+
+### 方式三：生产/类 App 单服务启动（Windows）
+
+只启动 FastAPI 一个服务，FastAPI 直接托管前端静态资源，无需 Vite：
+
+```powershell
+# 先构建前端（首次需要）
+cd frontend && npm run build && cd ..
+
+# 启动单服务
+powershell -ExecutionPolicy Bypass -File scripts\start-app-windows.ps1
+```
+
+浏览器打开 **http://127.0.0.1:8000**
+
+> 与开发模式的区别：只有一个 Python 进程，前端静态文件由 FastAPI 直接托管。适合日常使用或部署到内网。
+>
+> 支持参数：`-NoOpenBrowser`、`-AutoStopAfterSeconds N`。
 
 ### 开始使用
 
@@ -346,8 +364,11 @@ npm run e2e
 **Windows 启动脚本验证**（需要后端依赖已安装）：
 
 ```powershell
-# 自动启动 → 验证 → 停止，不打开浏览器
+# 开发模式：自动启动 → 验证 → 停止，不打开浏览器
 powershell -ExecutionPolicy Bypass -File scripts\test-windows-start.ps1
+
+# 生产模式：单服务启动 → 验证 → 停止
+powershell -ExecutionPolicy Bypass -File scripts\test-start-app-windows.ps1
 
 # 手动测试启动脚本参数
 powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 -NoOpenBrowser -AutoStopAfterSeconds 3
@@ -356,7 +377,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 -NoOpenBrowse
 powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
 ```
 
-截至当前版本，后端冒烟测试 **865 passed, 0 failed**，前端 E2E 测试 **20 passed**。
+截至当前版本，后端冒烟测试 **1071 passed, 0 failed**，前端 E2E 测试 **20 passed**。
 
 ## License
 

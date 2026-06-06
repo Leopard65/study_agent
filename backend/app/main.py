@@ -1,11 +1,19 @@
 import os
-from fastapi import FastAPI
+from pathlib import Path
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.database import init_db, async_session
 from app.config import get_settings, is_ai_configured
 from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, import_data, search, sessions, review, maintenance
+
+# Resolve frontend/dist relative to project root (backend/../frontend/dist)
+_BACKEND_DIR = Path(__file__).resolve().parent.parent  # backend/
+_PROJECT_ROOT = _BACKEND_DIR.parent
+_DIST_DIR = _PROJECT_ROOT / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -19,7 +27,7 @@ async def lifespan(app: FastAPI):
     await stop_worker()
 
 
-app = FastAPI(title="考研学习助手", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="考研学习助手", version="0.7.0", lifespan=lifespan)
 
 settings = get_settings()
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
@@ -101,3 +109,21 @@ async def health():
     if ocr_detail:
         result["ocr_detail"] = ocr_detail
     return result
+
+
+# ── Production mode: serve frontend/dist if present ──
+if _DIST_DIR.is_dir():
+    # Serve static assets (JS, CSS, images, etc.)
+    app.mount("/assets", StaticFiles(directory=str(_DIST_DIR / "assets")), name="static-assets")
+
+    # Serve other static files from dist (favicon, manifest, sw.js, etc.)
+    @app.get("/{full_path:path}")
+    async def serve_frontend(request: Request, full_path: str):
+        """Serve frontend files. Non-/api routes fall back to index.html for SPA routing."""
+        # API routes are handled by routers above — this catch-all only runs
+        # for paths that didn't match any API route.
+        file_path = _DIST_DIR / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+        # SPA fallback: serve index.html for client-side routing
+        return FileResponse(str(_DIST_DIR / "index.html"))

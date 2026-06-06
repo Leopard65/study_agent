@@ -163,9 +163,35 @@ Tesseract OCR 语言包不包含在导出中。新电脑需要：
 3. **清理孤儿文件**：长期使用后，删除/重试失败的资料可能留下孤儿文件，可安全清理
 4. **恢复后验证**：从备份恢复后，检查「缺失文件」是否为 0，确认所有资料文件已恢复
 
+## 学习会话导入策略
+
+导入学习会话（study_sessions）时，系统会进行严格的数据校验：
+
+- **duration_minutes**：必须为非负整数。`true`/`false`、浮点数、字符串、负数等均会被拒绝或重算。`0` 会按实际时长重算。超过实际时长的值会被截断。
+- **started_at**：缺失或无法解析 → 跳过，计入 `sessions_invalid`。
+- **ended_at < started_at** → 跳过，计入 `sessions_invalid`。
+- **活跃会话**（ended_at 为空）→ 导入时强制结束（以当前时间作为 ended_at）。如果 started_at 在未来导致 ended_at < started_at，也跳过。
+- **subject / note**：非字符串转为空字符串，超长截断。
+- **重复检测**：相同 started_at + subject + note 视为重复。
+
+导入结果中区分：
+- `sessions_imported`：成功导入数
+- `sessions_skipped`：重复跳过数
+- `sessions_invalid`：数据无效跳过数
+- `sessions_warnings`：详细警告信息列表
+
+## 复习间隔设置导入策略
+
+- 只允许导入 `review_intervals` 键，其他设置键被忽略。
+- 值必须为合法 JSON 数组，且通过 `validate_review_intervals` 校验（严格递增、1-365 范围、最多 10 项）。
+- 含布尔值（如 `[true, 2]`）的数组会被拒绝。
+- 无效设置计入 `settings_invalid`，不写入数据库。
+
 ## 注意事项
 
 - ZIP 导入可选择是否覆盖复习间隔配置（overwrite 策略会覆盖，skip 策略保留现有）
 - 真题答题记录的 question_id 会在导入时自动映射到新 ID
 - ZIP 导入后，恢复的资料会自动触发后台解析，重建全文索引
 - `keep_both` 策略下，资料文件名会添加"(副本)"后缀
+- JSON 备份不含上传原文件，导入后资料预览不可用（除非原文件已在 uploads 目录）
+- ZIP 备份含上传原文件，导入后自动恢复文件并触发后台解析

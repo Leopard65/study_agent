@@ -198,7 +198,7 @@ export default function Maintenance() {
         </div>
 
         {preview && (
-          <div className="p-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-sm">
+          <div data-testid="cleanup-preview" className="p-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-sm">
             <div className="font-medium mb-2">清理预览：</div>
             <ul className="space-y-1 text-gray-700 dark:text-gray-300">
               <li>🗑️ 孤儿文件: {preview.orphan_files_count} 个{preview.orphan_files_count > 0 && ` (${preview.orphan_files.slice(0, 5).join(', ')}${preview.orphan_files_count > 5 ? '...' : ''})`}</li>

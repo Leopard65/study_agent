@@ -2670,7 +2670,7 @@ def run(client: TestClient):
     # ── 29i. Version consistency ──
     print("\n[29i] Version consistency")
     from app.main import app as fastapi_app
-    check("FastAPI version=0.6.0", fastapi_app.version == "0.6.0", f"got {fastapi_app.version}")
+    check("FastAPI version=0.7.0", fastapi_app.version == "0.7.0", f"got {fastapi_app.version}")
 
     # Export should still use BACKUP_SCHEMA_VERSION
     r = client.get("/api/export/json")
@@ -3940,6 +3940,133 @@ def run(client: TestClient):
     r = client.get("/api/health")
     check("health ok after rapid race", r.status_code == 200)
     check("health status ok after rapid race", r.json().get("status") == "ok")
+
+    # ── 70. study_sessions import boundary validation ──
+    print("\n[70] study_sessions import boundary validation")
+
+    def _make_session_backup(sessions):
+        return {
+            "exported_at": "2026-01-01T00:00:00Z", "version": "0.3",
+            "materials": [], "material_chunks_count": 0,
+            "chat_history": [], "error_book": [], "study_plans": [],
+            "problems": [], "exam_questions": [], "exam_attempts": [],
+            "app_settings": [], "study_sessions": sessions,
+        }
+
+    # 70a: duration_minutes=true (bool) → should be recalculated
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-bool", "note": "t", "started_at": "2026-06-01T10:00:00Z",
+         "ended_at": "2026-06-01T11:00:00Z", "duration_minutes": True}
+    ]), params={"strategy": "skip"})
+    check("dur_bool 200", r.status_code == 200)
+    check("dur_bool imported=1", r.json()["sessions_imported"] == 1, f"got {r.json()}")
+    check("dur_bool has warning", len(r.json().get("sessions_warnings", [])) > 0 or r.json().get("sessions_imported") == 1)
+
+    # 70b: duration_minutes=1.5 (float) → should be recalculated
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-float", "note": "f", "started_at": "2026-06-01T12:00:00Z",
+         "ended_at": "2026-06-01T13:00:00Z", "duration_minutes": 1.5}
+    ]), params={"strategy": "skip"})
+    check("dur_float 200", r.status_code == 200)
+    check("dur_float imported=1", r.json()["sessions_imported"] == 1)
+    check("dur_float has warning", len(r.json().get("sessions_warnings", [])) > 0)
+
+    # 70c: duration_minutes="60" (string) → should be accepted as int
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-str60", "note": "s60", "started_at": "2026-06-01T14:00:00Z",
+         "ended_at": "2026-06-01T15:00:00Z", "duration_minutes": "60"}
+    ]), params={"strategy": "skip"})
+    check("dur_str60 200", r.status_code == 200)
+    check("dur_str60 imported=1", r.json()["sessions_imported"] == 1)
+
+    # 70d: duration_minutes="abc" (unparseable string) → should be recalculated
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-strabc", "note": "sabc", "started_at": "2026-06-01T16:00:00Z",
+         "ended_at": "2026-06-01T17:00:00Z", "duration_minutes": "abc"}
+    ]), params={"strategy": "skip"})
+    check("dur_strabc 200", r.status_code == 200)
+    check("dur_strabc imported=1", r.json()["sessions_imported"] == 1)
+    check("dur_strabc has warning", len(r.json().get("sessions_warnings", [])) > 0)
+
+    # 70e: duration_minutes=-30 (negative) → should be recalculated
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-neg", "note": "n", "started_at": "2026-06-01T18:00:00Z",
+         "ended_at": "2026-06-01T19:00:00Z", "duration_minutes": -30}
+    ]), params={"strategy": "skip"})
+    check("dur_neg 200", r.status_code == 200)
+    check("dur_neg imported=1", r.json()["sessions_imported"] == 1)
+    check("dur_neg has warning", len(r.json().get("sessions_warnings", [])) > 0)
+
+    # 70f: duration_minutes=999999999 (inflated) → should be capped
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-inflate", "note": "inf", "started_at": "2026-06-01T20:00:00Z",
+         "ended_at": "2026-06-01T21:00:00Z", "duration_minutes": 999999999}
+    ]), params={"strategy": "skip"})
+    check("dur_inflate 200", r.status_code == 200)
+    check("dur_inflate imported=1", r.json()["sessions_imported"] == 1)
+    check("dur_inflate capped", r.json().get("sessions_imported") == 1)
+    check("dur_inflate has warning", len(r.json().get("sessions_warnings", [])) > 0)
+
+    # 70g: missing started_at → invalid
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-nostart", "note": "ns", "ended_at": "2026-06-01T22:00:00Z", "duration_minutes": 60}
+    ]), params={"strategy": "skip"})
+    check("no_started 200", r.status_code == 200)
+    check("no_started invalid>=1", r.json().get("sessions_invalid", 0) >= 1, f"got {r.json()}")
+    check("no_started imported=0", r.json()["sessions_imported"] == 0)
+
+    # 70h: ended_at < started_at → invalid
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-reverse", "note": "rv", "started_at": "2026-06-02T10:00:00Z",
+         "ended_at": "2026-06-02T09:00:00Z", "duration_minutes": 60}
+    ]), params={"strategy": "skip"})
+    check("reverse 200", r.status_code == 200)
+    check("reverse invalid>=1", r.json().get("sessions_invalid", 0) >= 1, f"got {r.json()}")
+    check("reverse imported=0", r.json()["sessions_imported"] == 0)
+
+    # 70i: active session with started_at in the future → invalid
+    r = client.post("/api/import/json", json=_make_session_backup([
+        {"subject": "边界测试-future", "note": "fu", "started_at": "2099-01-01T00:00:00Z",
+         "ended_at": None, "duration_minutes": 0}
+    ]), params={"strategy": "skip"})
+    check("future_active 200", r.status_code == 200)
+    check("future_active invalid>=1", r.json().get("sessions_invalid", 0) >= 1, f"got {r.json()}")
+    check("future_active imported=0", r.json()["sessions_imported"] == 0)
+
+    # 70j: preview sessions_invalid mixed stats
+    r = client.post("/api/import/preview", json=_make_session_backup([
+        # valid
+        {"subject": "边界预览-ok", "note": "ok", "started_at": "2026-06-03T10:00:00Z",
+         "ended_at": "2026-06-03T11:00:00Z", "duration_minutes": 60},
+        # invalid: missing started_at
+        {"subject": "边界预览-bad", "note": "bad"},
+        # invalid: ended < started
+        {"subject": "边界预览-rev", "note": "rev", "started_at": "2026-06-03T12:00:00Z",
+         "ended_at": "2026-06-03T11:00:00Z", "duration_minutes": 60},
+    ]), params={"strategy": "skip"})
+    check("preview mixed 200", r.status_code == 200)
+    pv = r.json()
+    check("preview sessions_invalid=2", pv.get("sessions_invalid") == 2, f"got {pv.get('sessions_invalid')}")
+    check("preview study_sessions_count=1", pv.get("study_sessions_count") == 1, f"got {pv.get('study_sessions_count')}")
+
+    # 70k: verify dashboard/trends not polluted by bad sessions
+    r = client.get("/api/dashboard/trends", params={"days": 7})
+    check("trends after boundary 200", r.status_code == 200)
+    # No negative or absurdly large study_minutes values
+    for item in r.json().get("items", []):
+        check(f"trends {item['date']} minutes >= 0", item["study_minutes"] >= 0, f"got {item['study_minutes']}")
+        check(f"trends {item['date']} minutes sane", item["study_minutes"] < 10000, f"got {item['study_minutes']}")
+
+    # Cleanup boundary test sessions
+    async def _cleanup_boundary():
+        async with async_session() as session:
+            await session.execute(text(
+                "DELETE FROM study_sessions WHERE subject LIKE '边界测试-%' OR subject LIKE '边界预览-%'"
+            ))
+            await session.commit()
+    loop_bnd = asyncio.new_event_loop()
+    loop_bnd.run_until_complete(_cleanup_boundary())
+    loop_bnd.close()
 
 
 # ── Main ──
