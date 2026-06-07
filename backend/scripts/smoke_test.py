@@ -4428,48 +4428,106 @@ print(f"\n{'='*40}")
 print(f"  Results: {passed} passed, {failed} failed")
 print(f"{'='*40}")
 
-# ── Per-domain check count (anti-regression) ──
-print(f"\n{'─'*50}")
-print(f"  Per-domain check counts (anti-regression):")
-print(f"{'─'*50}")
-_total_checks = 0
-for domain, count in sorted(_domain_counts.items()):
-    print(f"  {domain:30s} {count:4d}")
-    _total_checks += count
-print(f"{'─'*50}")
-print(f"  {'TOTAL':30s} {_total_checks:4d}")
-print(f"{'─'*50}")
-
-# Save baseline for diff comparison
+# ── Per-domain check count (anti-regression gate) ──
 import json as _json
+
 _baseline_path = os.path.join(os.path.dirname(__file__), ".smoke_baseline.json")
+_baseline: dict[str, int] = {}
+_baseline_loaded = False
 try:
-    _old_baseline = {}
     if os.path.exists(_baseline_path):
         with open(_baseline_path, "r") as _bf:
-            _old_baseline = _json.load(_bf)
-    # Show diffs if previous baseline exists
-    if _old_baseline:
-        print(f"\n  Baseline diffs vs {_baseline_path}:")
-        _all_domains = set(list(_old_baseline.keys()) + list(_domain_counts.keys()))
-        _has_diff = False
-        for _d in sorted(_all_domains):
-            _old = _old_baseline.get(_d, 0)
-            _new = _domain_counts.get(_d, 0)
-            if _old != _new:
-                _delta = _new - _old
-                _sign = "+" if _delta > 0 else ""
-                print(f"    {_d:30s} {_old:4d} -> {_new:4d}  ({_sign}{_delta})")
-                _has_diff = True
-        if not _has_diff:
-            print("    (no changes)")
-    # Update baseline if all passed
-    if failed == 0:
+            _baseline = _json.load(_bf)
+            _baseline_loaded = True
+except Exception as _e:
+    print(f"\n  WARNING: could not read baseline: {_e}")
+
+# Print per-domain table
+print(f"\n{'─'*60}")
+print(f"  Per-domain check counts:")
+print(f"{'─'*60}")
+_total_checks = 0
+_baseline_total = 0
+_decreases: list[str] = []       # domain decreased vs baseline
+_disappeared: list[str] = []     # domain in baseline but missing now
+_increases: list[str] = []       # domain increased vs baseline
+_new_domains: list[str] = []     # domain not in baseline
+
+for _d in sorted(set(list(_baseline.keys()) + list(_domain_counts.keys()))):
+    _cur = _domain_counts.get(_d, 0)
+    _base = _baseline.get(_d, 0)
+    _total_checks += _cur
+    _baseline_total += _base
+    _marker = ""
+    if _d not in _domain_counts and _base > 0:
+        _marker = "  ← MISSING (baseline had this)"
+        _disappeared.append(_d)
+    elif _d not in _baseline:
+        _marker = "  ← NEW"
+        _new_domains.append(_d)
+    elif _cur < _base:
+        _marker = f"  ← DECREASED ({_base} -> {_cur})"
+        _decreases.append(_d)
+    elif _cur > _base:
+        _marker = f"  ← increased (+{_cur - _base})"
+        _increases.append(_d)
+    print(f"  {_d:30s} {_cur:4d}{_marker}")
+
+print(f"{'─'*60}")
+print(f"  {'TOTAL':30s} {_total_checks:4d}  (baseline: {_baseline_total})")
+print(f"{'─'*60}")
+
+# Gate: fail if any domain decreased or disappeared
+_baseline_failed = False
+if _baseline_loaded:
+    if _disappeared:
+        print(f"\n  ✗ BASELINE GATE FAIL: domain(s) disappeared: {', '.join(_disappeared)}")
+        _baseline_failed = True
+    if _decreases:
+        print(f"\n  ✗ BASELINE GATE FAIL: check count decreased in: {', '.join(_decreases)}")
+        _baseline_failed = True
+    if _baseline_failed:
+        failed += 1
+    else:
+        if _increases:
+            print(f"\n  ✓ baseline ok — increased domains: {', '.join(_increases)}")
+        elif _new_domains:
+            print(f"\n  ✓ baseline ok — new domains: {', '.join(_new_domains)}")
+        else:
+            print(f"\n  ✓ baseline ok — no regressions")
+else:
+    print(f"\n  (no baseline file found at {_baseline_path} — skipping gate)")
+
+# Update baseline only with explicit opt-in
+_update_env = os.environ.get("SMOKE_UPDATE_BASELINE", "0")
+_will_update = False
+if _update_env == "1" and failed == 0 and not _baseline_failed:
+    if _decreases or _disappeared:
+        # Decreases exist but gate was somehow not triggered — refuse
+        print(f"\n  ✗ REFUSING to update baseline: decreases detected.")
+        print(f"    Set SMOKE_ALLOW_BASELINE_DECREASE=1 to override (not recommended).")
+    else:
         with open(_baseline_path, "w") as _bf:
             _json.dump(_domain_counts, _bf, indent=2)
-        print(f"\n  Baseline saved to {_baseline_path}")
-except Exception as _e:
-    print(f"  (baseline save skipped: {_e})")
+        print(f"\n  ✓ Baseline updated to {_baseline_path}")
+        _will_update = True
+elif _update_env == "1" and (_decreases or _disappeared):
+    # Check explicit override
+    if os.environ.get("SMOKE_ALLOW_BASELINE_DECREASE", "0") == "1":
+        with open(_baseline_path, "w") as _bf:
+            _json.dump(_domain_counts, _bf, indent=2)
+        print(f"\n  ⚠ Baseline FORCE-updated (SMOKE_ALLOW_BASELINE_DECREASE=1)")
+        _will_update = True
+    else:
+        print(f"\n  ✗ REFUSING to update baseline: decreases detected.")
+        print(f"    Set SMOKE_ALLOW_BASELINE_DECREASE=1 to override (not recommended).")
+elif _update_env == "1":
+    print(f"\n  ✗ Cannot update baseline: tests have failures.")
+else:
+    if _baseline_loaded and not _baseline_failed:
+        _any_change = _increases or _new_domains or _decreases or _disappeared
+        if _any_change:
+            print(f"\n  (baseline unchanged — set SMOKE_UPDATE_BASELINE=1 to save changes)")
 
 # ── Cleanup temp files ──
 try:
