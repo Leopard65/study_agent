@@ -1,8 +1,12 @@
+"""GET/PUT /api/settings/review — review intervals (DB-backed).
+
+App-level settings (.env-backed) live in app_settings.py / env_store.py.
+"""
+
 import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from app.database import get_db
 from app.models import AppSetting
 
@@ -10,14 +14,12 @@ from app.models import AppSetting
 class ReviewSettingsUpdate(BaseModel):
     intervals: list[StrictInt] = Field(..., min_length=1, max_length=10)
 
-router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 DEFAULT_INTERVALS = [1, 3, 7, 14]
 SETTING_KEY = "review_intervals"
 
 
 def validate_review_intervals(intervals: list[int]) -> str | None:
-    """Validate review intervals. Returns error message or None if valid."""
     if not isinstance(intervals, list) or len(intervals) < 1 or len(intervals) > 10:
         return "间隔列表长度必须为 1-10"
     for v in intervals:
@@ -35,7 +37,6 @@ async def get_review_intervals(db: AsyncSession) -> list[int]:
         return DEFAULT_INTERVALS
     try:
         parsed = json.loads(record.value)
-        # Defend against dirty DB values
         if not isinstance(parsed, list):
             return DEFAULT_INTERVALS
         err = validate_review_intervals(parsed)
@@ -44,6 +45,9 @@ async def get_review_intervals(db: AsyncSession) -> list[int]:
         return parsed
     except Exception:
         return DEFAULT_INTERVALS
+
+
+router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 @router.get("/review")

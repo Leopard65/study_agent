@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.database import init_db, async_session
 from app.config import get_settings, is_ai_configured
-from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, import_data, search, sessions, review, maintenance
+from app.routers import chat, materials, problems, errors, plan, dashboard, exam, export, settings as settings_router, app_settings as app_settings_router, import_data, search, sessions, review, maintenance
 
 # Resolve frontend/dist relative to project root (backend/../frontend/dist)
 _BACKEND_DIR = Path(__file__).resolve().parent.parent  # backend/
@@ -48,6 +48,7 @@ app.include_router(dashboard.router)
 app.include_router(exam.router)
 app.include_router(export.router)
 app.include_router(settings_router.router)
+app.include_router(app_settings_router.router)
 app.include_router(import_data.router)
 app.include_router(search.router)
 app.include_router(sessions.router)
@@ -112,10 +113,14 @@ async def health():
 
 
 # ── Production mode: serve frontend/dist if present ──
-if _DIST_DIR.is_dir():
-    # Serve static assets (JS, CSS, images, etc.)
-    app.mount("/assets", StaticFiles(directory=str(_DIST_DIR / "assets")), name="static-assets")
+_INDEX_HTML = _DIST_DIR / "index.html"
+_ASSETS_DIR = _DIST_DIR / "assets"
 
+# Only mount /assets when the directory actually exists (avoids crash on incomplete builds)
+if _ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="static-assets")
+
+if _INDEX_HTML.is_file():
     # Serve other static files from dist (favicon, manifest, sw.js, etc.)
     @app.get("/{full_path:path}")
     async def serve_frontend(request: Request, full_path: str):
@@ -128,4 +133,4 @@ if _DIST_DIR.is_dir():
         if file_path.is_file():
             return FileResponse(str(file_path))
         # SPA fallback: serve index.html for client-side routing
-        return FileResponse(str(_DIST_DIR / "index.html"))
+        return FileResponse(str(_INDEX_HTML))

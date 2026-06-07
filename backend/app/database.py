@@ -1,9 +1,39 @@
+import os
+from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
-from app.config import get_settings
+from sqlalchemy.engine import make_url
+from app.config import get_settings, _BACKEND_DIR
+
+
+def _ensure_db_dir(db_url: str) -> None:
+    """Ensure the parent directory of the SQLite database file exists.
+
+    Expects an already-normalized URL (from config's field_validator).
+    Skips in-memory and non-sqlite URLs.
+    """
+    try:
+        url = make_url(db_url)
+    except Exception:
+        return
+    if not url.drivername.startswith("sqlite"):
+        return
+    db_path = url.database
+    if not db_path or db_path == ":memory:":
+        return
+    p = Path(db_path)
+    if not p.is_absolute():
+        # Defensive fallback — should not happen after config normalization
+        p = (_BACKEND_DIR / p).resolve()
+    db_dir = p.parent
+    if not db_dir.exists():
+        db_dir.mkdir(parents=True, exist_ok=True)
+
 
 settings = get_settings()
+# settings.database_url is already normalized by config's field_validator
+_ensure_db_dir(settings.database_url)
 
 engine = create_async_engine(settings.database_url, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)

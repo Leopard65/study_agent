@@ -600,9 +600,9 @@ test.describe('ZIP backup', () => {
     // Preview should refresh
     await expect(page.getByText(/完整备份预览/)).toBeVisible({ timeout: 10_000 });
 
-    // Cancel the import
-    await page.getByRole('button', { name: '取消' }).click();
-    await expect(page.getByText(/完整备份预览/)).toHaveCount(0);
+    // Cancel the import — scope to ZIP preview to avoid matching JSON cancel button
+    await page.getByTestId('zip-import-preview').getByRole('button', { name: '取消' }).click();
+    await expect(page.getByTestId('zip-import-preview')).toHaveCount(0);
 
     // Cleanup
     await page.request.delete(`${apiBase}/materials/${mat.id}`);

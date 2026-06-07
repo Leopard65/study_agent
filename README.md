@@ -138,6 +138,9 @@ powershell -ExecutionPolicy Bypass -File scripts\start-app-windows.ps1
 > - 首次运行会自动创建 `.venv` 并安装后端依赖（同开发启动脚本逻辑）。
 > - `frontend/dist` 不存在时会自动 `npm run build`。
 > - `/api/*` 路由不被前端 fallback 吃掉：未匹配的 API 路径返回 404 JSON，而非 `index.html`。
+> - 首次启动时会自动创建 `backend/data/`（SQLite 数据库目录）和 `backend/uploads/`（上传文件存储目录）。
+> - 如果 `frontend/dist/` 不完整（缺少 `index.html` 或 `assets/`），应用不会崩溃，只是不托管前端页面。
+> - **路径语义**：`DATABASE_URL` 和 `UPLOAD_DIR` 中的相对路径均以 `backend/` 目录为基准解析，不会因启动命令的工作目录不同而漂移。绝对路径保持不变。`sqlite:///:memory:` 等内存数据库不会触发目录创建。
 >
 > 支持参数：`-NoOpenBrowser`、`-AutoStopAfterSeconds N`。
 
@@ -202,8 +205,8 @@ TESSDATA_DIR=./tessdata
 | `OPENAI_MODEL` | `deepseek-v4-flash` | 模型名称 |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 前端访问地址 |
 | `APP_TIMEZONE` | `Asia/Shanghai` | 时区 |
-| `DATABASE_URL` | `sqlite+aiosqlite:///./data/app.db` | 数据库路径 |
-| `UPLOAD_DIR` | `./uploads` | 上传文件存储路径 |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./data/app.db` | 数据库路径（相对路径以 `backend/` 为基准） |
+| `UPLOAD_DIR` | `./uploads` | 上传文件存储路径（相对路径以 `backend/` 为基准） |
 | `MAX_UPLOAD_MB` | `50` | 单文件上传大小限制（MB） |
 | `MATERIAL_PREVIEW_CHARS` | `5000` | 资料详情预览字符数 |
 | `MATERIAL_PARSE_CONCURRENCY` | `1` | 后台解析并发数 |
@@ -213,6 +216,8 @@ TESSDATA_DIR=./tessdata
 | `TESSDATA_DIR` | — | Tesseract 语言包目录 |
 | `OCR_MIN_TEXT_CHARS` | `80` | 低于此字数触发 OCR |
 | `OCR_MAX_PAGES` | `30` | OCR 最大页数 |
+
+> **路径解析规则**：`DATABASE_URL` 和 `UPLOAD_DIR` 中的相对路径（如 `./data/app.db`、`./uploads`）始终以 `backend/` 目录为基准解析，与启动命令的当前工作目录无关。绝对路径（如 `C:\data\app.db`）保持不变。`sqlite:///:memory:` 不触发目录创建。
 
 ## 功能一览
 
@@ -371,17 +376,54 @@ npm run e2e
 # 开发模式：自动启动 → 验证 → 停止，不打开浏览器
 powershell -ExecutionPolicy Bypass -File scripts\test-windows-start.ps1
 
-# 生产模式：单服务启动 → 验证 → 停止
+# 生产模式 smoke test（复用现有 .venv/dist/.env，验证生产启动链路）
 powershell -ExecutionPolicy Bypass -File scripts\test-start-app-windows.ps1
+
+# 生产模式 smoke test（-Clean：隔离 .venv/dist/.env，使用临时 DB/上传目录，不触碰真实 backend/data）
+powershell -ExecutionPolicy Bypass -File scripts\test-start-app-windows.ps1 -Clean
 
 # 手动测试启动脚本参数
 powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 -NoOpenBrowser -AutoStopAfterSeconds 3
 
 # 测试停止脚本
 powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
+
+# 备份解析回归测试（验证 .env 备份安全处理逻辑）
+powershell -ExecutionPolicy Bypass -File scripts\test-backup-resolution.ps1
 ```
 
-截至当前版本，后端冒烟测试 **1080 passed, 0 failed**，前端 E2E 测试 **21 passed**。
+> **生产 smoke test**（`test-start-app-windows.ps1`）验证生产启动链路：venv、依赖、.env、前端构建、后端启动、端点健康、SPA 路由、静态资源分发。默认复用现有构建产物（快速路径）；加 `-Clean` 进入「clean artifact isolation」模式：隔离 `.venv`/`dist`/`.env`（唯一后缀备份，测试后恢复），使用临时 `DATABASE_URL`/`UPLOAD_DIR`（写入临时 `.env`，不碰真实 `backend/data/`），复用 `frontend/node_modules`（不重新 `npm install`）。无论成功或失败，都会清理进程树和端口 8000。
+
+截至当前版本，后端冒烟测试 **1127 passed, 0 failed**，前端 E2E 测试 **21 passed**。
+
+## 首启与设置
+
+首次启动时，脚本会自动创建以下目录：
+- `backend/data/` — SQLite 数据库（`app.db` 自动生成）
+- `backend/uploads/` — 上传文件存储
+- `backend/.venv/` — Python 虚拟环境（首次 `pip install` 后生效）
+- `frontend/dist/` — 前端构建产物（首次 `npm run build` 后生效）
+
+**只需一步即可启用 AI 功能**：编辑 `backend/.env`，填入 `OPENAI_API_KEY=你的Key`，重启后端。
+
+也可通过 Web 界面配置：打开侧边栏「⚙️ 设置」页面，填入 API Key、选择服务商和模型，保存即可。
+
+### API 接口分工
+
+| 接口 | 用途 | 返回内容 |
+|---|---|---|
+| `GET /api/settings/app` | 持久化配置（`.env`） | `ai_configured`、`openai_base_url`、`openai_model`、`ocr_enabled` |
+| `PUT /api/settings/app` | 写入配置 | 写 `.env` + 清缓存 + 返回确认值 |
+| `GET /api/health` | 运行时状态 | `database`、`upload_dir`、`ocr_available`、`ai_configured`、`model` |
+
+**保存设置后**：当前进程立即生效（通过 `get_settings()` 缓存清除），其他进程需重启后端。
+
+| 配置项 | 必填 | 说明 |
+|---|:---:|---|
+| `OPENAI_API_KEY` | 否 | AI 功能必填；留空可使用错题本、复习、资料管理等核心功能；可在设置页清空 |
+| `OPENAI_BASE_URL` | 否 | 默认 DeepSeek；支持 OpenAI、Ollama 等任何 OpenAI-compatible API |
+| `OPENAI_MODEL` | 否 | 默认 `deepseek-v4-flash` |
+| OCR 相关 | 否 | 扫描版 PDF 识别需安装 Tesseract，普通 PDF 不受影响 |
 
 ## License
 

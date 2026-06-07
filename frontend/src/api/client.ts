@@ -547,6 +547,37 @@ export const submitReviewAction = (errorId: number, action: string): Promise<Rev
 export const getHealth = (): Promise<HealthStatus> =>
   api.get<HealthStatus>('/health').then(r => r.data);
 
+// ── App Settings ──
+export interface AppSettings {
+  ai_configured: boolean;
+  openai_base_url: string;
+  openai_model: string;
+  ocr_enabled: boolean;
+}
+
+export interface AppSettingsUpdate {
+  openai_api_key?: string;
+  openai_base_url?: string;
+  openai_model?: string;
+  clear_api_key?: boolean;
+}
+
+export interface AppSettingsResult {
+  ok: boolean;
+  ai_configured: boolean;
+  openai_base_url: string;
+  openai_model: string;
+  ocr_enabled: boolean;
+  note: string;
+  updated_keys: string[];
+}
+
+export const getAppSettings = (): Promise<AppSettings> =>
+  api.get<AppSettings>('/settings/app').then(r => r.data);
+
+export const updateAppSettings = (data: AppSettingsUpdate): Promise<AppSettingsResult> =>
+  api.put<AppSettingsResult>('/settings/app', data).then(r => r.data);
+
 // ── Maintenance ──
 export interface MaintenanceHealth {
   total_materials: number;
