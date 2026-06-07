@@ -394,7 +394,25 @@ powershell -ExecutionPolicy Bypass -File scripts\test-backup-resolution.ps1
 
 > **生产 smoke test**（`test-start-app-windows.ps1`）验证生产启动链路：venv、依赖、.env、前端构建、后端启动、端点健康、SPA 路由、静态资源分发。默认复用现有构建产物（快速路径）；加 `-Clean` 进入「clean artifact isolation」模式：隔离 `.venv`/`dist`/`.env`（唯一后缀备份，测试后恢复），使用临时 `DATABASE_URL`/`UPLOAD_DIR`（写入临时 `.env`，不碰真实 `backend/data/`），复用 `frontend/node_modules`（不重新 `npm install`）。无论成功或失败，都会清理进程树和端口 8000。
 
-截至当前版本，后端冒烟测试 **1127 passed, 0 failed**，前端 E2E 测试 **21 passed**。per-domain baseline（`backend/scripts/.smoke_baseline.json`）默认只校验不自动更新；新增检查后用 `SMOKE_UPDATE_BASELINE=1 python scripts/smoke_test.py` 更新基线。
+截至当前版本，后端冒烟测试 **1127 passed, 0 failed**，前端 E2E 测试 **21 passed**。
+
+### Smoke Baseline Gate
+
+per-domain baseline 文件 `backend/scripts/.smoke_baseline.json` 受版本控制，**普通运行只校验、绝不改写**。若 baseline 缺失或任一 domain check 数减少，测试以非零退出。
+
+更新基线（新增检查后）：
+
+```powershell
+# PowerShell
+$env:SMOKE_UPDATE_BASELINE='1'; python scripts/smoke_test.py; Remove-Item Env:SMOKE_UPDATE_BASELINE
+```
+
+```bash
+# bash
+SMOKE_UPDATE_BASELINE=1 python scripts/smoke_test.py
+```
+
+> `SMOKE_ALLOW_BASELINE_DECREASE=1` 仅用于人工确认的紧急回退场景，常规流程不要使用。
 
 ## 首启与设置
 

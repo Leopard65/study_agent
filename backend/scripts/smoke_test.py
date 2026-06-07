@@ -4442,6 +4442,8 @@ try:
 except Exception as _e:
     print(f"\n  WARNING: could not read baseline: {_e}")
 
+_update_env = os.environ.get("SMOKE_UPDATE_BASELINE", "0") == "1"
+
 # Print per-domain table
 print(f"\n{'─'*60}")
 print(f"  Per-domain check counts:")
@@ -4477,9 +4479,22 @@ print(f"{'─'*60}")
 print(f"  {'TOTAL':30s} {_total_checks:4d}  (baseline: {_baseline_total})")
 print(f"{'─'*60}")
 
-# Gate: fail if any domain decreased or disappeared
+# ── Gate logic ──
 _baseline_failed = False
-if _baseline_loaded:
+
+if not _baseline_loaded:
+    # Baseline file missing — hard fail unless creating it
+    if _update_env and failed == 0:
+        with open(_baseline_path, "w") as _bf:
+            _json.dump(_domain_counts, _bf, indent=2)
+        print(f"\n  ✓ Baseline CREATED at {_baseline_path} (SMOKE_UPDATE_BASELINE=1)")
+    else:
+        print(f"\n  ✗ BASELINE GATE FAIL: {_baseline_path} not found.")
+        print(f"    Run with SMOKE_UPDATE_BASELINE=1 to create initial baseline.")
+        _baseline_failed = True
+        failed += 1
+else:
+    # Baseline exists — check for regressions
     if _disappeared:
         print(f"\n  ✗ BASELINE GATE FAIL: domain(s) disappeared: {', '.join(_disappeared)}")
         _baseline_failed = True
@@ -4495,36 +4510,27 @@ if _baseline_loaded:
             print(f"\n  ✓ baseline ok — new domains: {', '.join(_new_domains)}")
         else:
             print(f"\n  ✓ baseline ok — no regressions")
-else:
-    print(f"\n  (no baseline file found at {_baseline_path} — skipping gate)")
 
-# Update baseline only with explicit opt-in
-_update_env = os.environ.get("SMOKE_UPDATE_BASELINE", "0")
-_will_update = False
-if _update_env == "1" and failed == 0 and not _baseline_failed:
-    if _decreases or _disappeared:
-        # Decreases exist but gate was somehow not triggered — refuse
-        print(f"\n  ✗ REFUSING to update baseline: decreases detected.")
-        print(f"    Set SMOKE_ALLOW_BASELINE_DECREASE=1 to override (not recommended).")
-    else:
-        with open(_baseline_path, "w") as _bf:
-            _json.dump(_domain_counts, _bf, indent=2)
-        print(f"\n  ✓ Baseline updated to {_baseline_path}")
-        _will_update = True
-elif _update_env == "1" and (_decreases or _disappeared):
-    # Check explicit override
-    if os.environ.get("SMOKE_ALLOW_BASELINE_DECREASE", "0") == "1":
-        with open(_baseline_path, "w") as _bf:
-            _json.dump(_domain_counts, _bf, indent=2)
-        print(f"\n  ⚠ Baseline FORCE-updated (SMOKE_ALLOW_BASELINE_DECREASE=1)")
-        _will_update = True
-    else:
-        print(f"\n  ✗ REFUSING to update baseline: decreases detected.")
-        print(f"    Set SMOKE_ALLOW_BASELINE_DECREASE=1 to override (not recommended).")
-elif _update_env == "1":
-    print(f"\n  ✗ Cannot update baseline: tests have failures.")
-else:
-    if _baseline_loaded and not _baseline_failed:
+    # Update baseline only with explicit opt-in
+    if _update_env and failed == 0 and not _baseline_failed:
+        if _decreases or _disappeared:
+            print(f"\n  ✗ REFUSING to update baseline: decreases detected.")
+            print(f"    Set SMOKE_ALLOW_BASELINE_DECREASE=1 to override (emergency only).")
+        else:
+            with open(_baseline_path, "w") as _bf:
+                _json.dump(_domain_counts, _bf, indent=2)
+            print(f"\n  ✓ Baseline updated to {_baseline_path}")
+    elif _update_env and (_decreases or _disappeared):
+        if os.environ.get("SMOKE_ALLOW_BASELINE_DECREASE", "0") == "1":
+            with open(_baseline_path, "w") as _bf:
+                _json.dump(_domain_counts, _bf, indent=2)
+            print(f"\n  ⚠ Baseline FORCE-updated (SMOKE_ALLOW_BASELINE_DECREASE=1)")
+        else:
+            print(f"\n  ✗ REFUSING to update baseline: decreases detected.")
+            print(f"    Set SMOKE_ALLOW_BASELINE_DECREASE=1 to override (emergency only).")
+    elif _update_env:
+        print(f"\n  ✗ Cannot update baseline: tests have failures.")
+    elif not _baseline_failed:
         _any_change = _increases or _new_domains or _decreases or _disappeared
         if _any_change:
             print(f"\n  (baseline unchanged — set SMOKE_UPDATE_BASELINE=1 to save changes)")
